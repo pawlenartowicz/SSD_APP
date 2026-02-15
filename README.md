@@ -251,4 +251,6 @@ If you use SSD in your research, please cite:
 
 ## License
 
-[Add license information here]
+This project is licensed under the [MIT License](LICENSE).
+
+Some dependencies are distributed under the LGPL — see the [LICENSES/](LICENSES/) directory for details.
