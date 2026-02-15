@@ -768,6 +768,9 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.Yes:
             self._open_settings_dialog()
 
+        # Always offer appearance choice on first run
+        self._open_appearance_dialog()
+
     def _open_tutorial(self):
         """Open the tutorial dialog (non-modal so the main UI stays usable)."""
         from .tutorial_dialog import TutorialDialog
@@ -797,6 +800,10 @@ class MainWindow(QMainWindow):
             "Differential analysis on text data.</p>"
             "<p>Designed for psychologists and researchers working with "
             "text-based outcome data.</p>"
+            "<hr>"
+            "<p><b>Author:</b> Hubert Plisiecki</p>"
+            "<p><b>Contact:</b> <a href='mailto:hplisiecki@gmail.com'>hplisiecki@gmail.com</a></p>"
+            "<p><b>GitHub:</b> <a href='https://github.com/hplisiecki/SSD_APP'>github.com/hplisiecki/SSD_APP</a></p>"
         )
 
     def _validate_window_geometry(self) -> bool:

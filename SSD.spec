@@ -1,15 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec file for SSDiff GUI — Full edition (includes Asian languages).
-
-Requires additional pip packages:
-    pip install spacy-pkuseg sudachipy sudachidict-core
+PyInstaller spec file for SSD.
 
 Build with:
-    pyinstaller SSDiffGUI_full.spec --clean --noconfirm
+    pyinstaller SSD.spec --clean --noconfirm
+
+Requires:
+    pip install spacy-pkuseg sudachipy sudachidict-core
 """
 
 import sys
+import glob
 from pathlib import Path
 
 block_cipher = None
@@ -17,10 +18,21 @@ block_cipher = None
 # Get the directory containing this spec file
 SPEC_DIR = Path(SPECPATH) if 'SPECPATH' in dir() else Path('.')
 
+# Collect MKL and runtime DLLs required by numpy/scipy (Anaconda)
+mkl_binaries = []
+for mkl_dir in [
+    Path(sys.prefix) / 'Library' / 'bin',
+    Path(sys.prefix) / 'DLLs',
+]:
+    if mkl_dir.exists():
+        for pattern in ['mkl*.dll', 'libiomp*.dll', 'libblas*.dll', 'liblapack*.dll', 'vcomp*.dll']:
+            for dll in mkl_dir.glob(pattern):
+                mkl_binaries.append((str(dll), '.'))
+
 a = Analysis(
     ['ssdiff_gui/main.py'],
     pathex=[str(SPEC_DIR)],
-    binaries=[],
+    binaries=mkl_binaries,
     datas=[
         # Include resources folder if it exists
         ('ssdiff_gui/resources', 'resources'),
@@ -29,9 +41,14 @@ a = Analysis(
         # Core packages
         'ssdiff',
         'ssdiff.core',
-        'ssdiff.preprocessing',
-        'ssdiff.embeddings',
+        'ssdiff.preprocess',
+        'ssdiff.clusters',
+        'ssdiff.crossgroup',
+        'ssdiff.io_utils',
         'ssdiff.lexicon',
+        'ssdiff.snippets',
+        'ssdiff.sweep',
+        'ssdiff.utils',
 
         # GUI
         'PySide6',
@@ -42,9 +59,16 @@ a = Analysis(
         # Data processing
         'pandas',
         'numpy',
+        'numpy.core._methods',
+        'numpy.linalg',
         'scipy',
         'scipy.sparse',
         'scipy.spatial',
+        'scipy.linalg',
+        'scipy.stats',
+        'scipy.special',
+        'scipy.optimize',
+        'scipy._lib',
 
         # NLP
         'gensim',
@@ -62,6 +86,9 @@ a = Analysis(
         'sklearn.cluster',
         'sklearn.decomposition',
         'sklearn.metrics',
+        'sklearn.preprocessing',
+        'sklearn.utils',
+        'sklearn.utils._cython_blas',
 
         # Export
         'docx',
@@ -75,14 +102,10 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[
-        'hooks/hook_edition_full.py',
-    ],
+    runtime_hooks=[],
     excludes=[
         # Exclude unnecessary packages to reduce size
         'tkinter',
-        'matplotlib',
-        'seaborn',
         'IPython',
         'jupyter',
         'pytest',
@@ -122,14 +145,14 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='SSDiffGUI_Full',
+    name='SSD',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # No console window (windowed app)
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

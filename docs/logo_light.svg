@@ -31,10 +31,14 @@
     <filter id="dot-glow" x="-200%" y="-200%" width="500%" height="500%">
       <feGaussianBlur in="SourceGraphic" stdDeviation="3"/>
     </filter>
+    <clipPath id="rounded-clip">
+      <rect width="256" height="256" rx="32" ry="32"/>
+    </clipPath>
   </defs>
 
   <rect width="256" height="256" rx="32" ry="32" fill="#ffffff"/>
 
+  <g clip-path="url(#rounded-clip)">
   <!-- Full line behind sphere (interior ghosts through) -->
   <line x1="29.2" y1="189.7" x2="226.8" y2="66.3"
         stroke="url(#ssd-grad)" stroke-width="28" stroke-linecap="round"
@@ -69,4 +73,5 @@
           fill="#6b7de6" fill-opacity="0.60" filter="url(#dot-glow)"/>
   <circle cx="226.8" cy="66.3" r="3"
           fill="#6b7de6" fill-opacity="0.90"/>
+  </g>
 </svg>

@@ -2,7 +2,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/logo_dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="docs/logo_light.svg">
-    <img src="docs/logo_dark.svg" alt="SSDiff GUI" width="256">
+    <img src="docs/logo_dark.svg" alt="SSD" width="256">
   </picture>
 </p>
 
@@ -11,29 +11,64 @@
 <p align="center">A desktop application for <b>Supervised Semantic Differential (SSD)</b> analysis.</p>
 
 <p align="center">
-  <a href="https://github.com/hplisiecki/SSD_APP/releases/latest">Download (Standard)</a> &nbsp;|&nbsp;
-  <a href="https://github.com/hplisiecki/SSD_APP/releases/latest">Download (Full — Asian languages)</a> &nbsp;|&nbsp;
+  <a href="https://github.com/hplisiecki/SSD_APP/releases/latest">Download</a> &nbsp;|&nbsp;
   <a href="https://github.com/hplisiecki/Supervised-Semantic-Differential">ssdiff core library</a>
 </p>
 
-SSDiff finds interpretable semantic dimensions in text data that are associated with a continuous outcome variable or categorical group labels.
+SSD finds interpretable semantic dimensions in text data that are associated with a continuous outcome variable or categorical group labels.
 
-Given a corpus of texts with associated numeric scores or group memberships, SSDiff identifies the direction through word-embedding space that best explains variation in the outcome. The result is a semantic dimension with two interpretable poles — one associated with high outcomes, the other with low — complete with thematic clusters, example sentences, and statistical validation.
+Given a corpus of texts with associated numeric scores or group memberships, SSD identifies the direction through word-embedding space that best explains variation in the outcome. The result is a semantic dimension with two interpretable poles — one associated with high outcomes, the other with low — complete with thematic clusters, example sentences, and statistical validation.
 
 This application is the GUI frontend for the [ssdiff](https://github.com/hplisiecki/Supervised-Semantic-Differential) Python package.
 
 ---
 
-## Downloads
+## Download
 
-Pre-built Windows executables are available on the [Releases](https://github.com/hplisiecki/SSD_APP/releases/latest) page:
+A pre-built Windows executable is available on the [Releases](https://github.com/hplisiecki/SSD_APP/releases/latest) page. No Python installation required — just download **SSD.exe** and run it.
 
-| Edition | Description |
-|---------|-------------|
-| **SSDiffGUI.exe** | Standard edition — 20 European languages |
-| **SSDiffGUI_Full.exe** | Full edition — adds Chinese, Japanese, and Korean (requires additional tokenizer backends bundled in) |
+spaCy language models are downloaded automatically on first use.
 
-spaCy language models are downloaded automatically on first use — no manual installation needed.
+---
+
+## Supported Languages
+
+SSD supports 23 languages via spaCy models (small, medium, and large variants available for each):
+
+| Code | Language | Code | Language | Code | Language |
+|-----|---------|------|----------|------|----------|
+| `ca` | Catalan | `hr` | Croatian | `pl` | Polish |
+| `da` | Danish  | `it` | Italian | `pt` | Portuguese |
+| `de` | German  | `ja` | Japanese | `ro` | Romanian |
+| `el` | Greek   | `ko` | Korean | `ru` | Russian |
+| `en` | English | `lt` | Lithuanian | `sl` | Slovenian |
+| `es` | Spanish | `mk` | Macedonian | `sv` | Swedish |
+| `fr` | French  | `nb` | Norwegian | `uk` | Ukrainian |
+| `nl` | Dutch | `zh` | Chinese |
+
+---
+
+## Word Embeddings
+
+SSD requires pre-trained word embeddings, which are **not bundled** with the application due to their size. You need to download an embedding file separately before running an analysis.
+
+### Recommended Sources
+
+- **[GloVe](https://nlp.stanford.edu/projects/glove/)** (English) — Download GloVe 840B 300d (~2 GB) for the best coverage, or GloVe 6B for quick tests.
+- **[fastText](https://fasttext.cc/docs/en/crawl-vectors.html)** (157 languages) — Pre-trained word vectors for most languages. Download the `.bin` format.
+- **[Polish distributional models](https://dsmodels.nlp.ipipan.waw.pl)** — For Polish-language analyses.
+- **Custom** — Train your own with gensim's Word2Vec or fastText and export as `.kv`.
+
+### Supported Formats
+
+| Format | Extension | Notes |
+|--------|-----------|-------|
+| gensim KeyedVectors | `.kv` | Fastest to load |
+| word2vec binary | `.bin` | Standard binary format |
+| Text | `.txt`, `.vec` | One word per line + floats |
+| Compressed text | `.txt.gz`, `.vec.gz` | Gzip-compressed text |
+
+> **Tip:** The app offers to convert text-format embeddings to `.kv` on first load, which makes subsequent loads much faster.
 
 ---
 
@@ -68,8 +103,7 @@ spaCy language models are downloaded automatically on first use — no manual in
 ### Prerequisites
 
 - Python 3.10+
-- A [spaCy](https://spacy.io/) language model (e.g., `en_core_web_sm`)
-- Pre-trained word embeddings in any standard format (GloVe `.txt`, word2vec `.bin`, fastText `.vec`, or gensim `.kv`)
+- Pre-trained word embeddings (see [Word Embeddings](#word-embeddings) above)
 
 ### Setup
 
@@ -81,22 +115,17 @@ cd SSD_APP
 # Install dependencies
 pip install -r requirements.txt
 
-# Download a spaCy model
-python -m spacy download en_core_web_sm
+# Asian language support (Chinese, Japanese, Korean)
+pip install spacy-pkuseg sudachipy sudachidict-core
 
 # Run the application
 python run.py
 ```
 
-### Building Standalone Executables
+### Building the Executable
 
 ```bash
-# Standard edition (European languages)
-pyinstaller SSDiffGUI.spec --clean --noconfirm
-
-# Full edition (adds Chinese, Japanese, Korean)
-# Requires: pip install spacy-pkuseg sudachipy sudachidict-core
-pyinstaller SSDiffGUI_full.spec --clean --noconfirm
+pyinstaller SSD.spec --clean --noconfirm
 ```
 
 ---
@@ -109,7 +138,7 @@ Configure the data, text processing, and embedding settings.
 
 1. **Load dataset** — import a CSV, TSV, or Excel file and select the text, ID, and outcome/group columns
 2. **Validate** — check for missing values and confirm the dataset is ready
-3. **Preprocess** — tokenize, lemmatize, and sentence-split texts using spaCy (20+ languages supported)
+3. **Preprocess** — tokenize, lemmatize, and sentence-split texts using spaCy
 4. **Load embeddings** — load a pre-trained word-embedding file with optional L2 normalization and ABTT (All-But-The-Top) denoising; text-format files (`.txt`, `.vec`) can be auto-converted to `.kv` for faster future loading
 5. **Choose analysis type** — continuous outcome (regression) or group comparison (permutation test)
 6. **Set hyperparameters** — PCA sweep range, context window size, SIF weighting, clustering parameters, and more
@@ -156,8 +185,7 @@ Multiple runs can be saved and compared using the run selector. Results can be e
 SSD_APP/
 ├── run.py                          # Application entry point
 ├── requirements.txt                # Python dependencies
-├── SSDiffGUI.spec                  # PyInstaller build (standard edition)
-├── SSDiffGUI_full.spec             # PyInstaller build (full edition)
+├── SSD.spec                        # PyInstaller build configuration
 │
 └── ssdiff_gui/                     # Main package
     ├── main.py                     # App initialization
@@ -204,7 +232,7 @@ SSD_APP/
 
 ## Citation
 
-If you use SSDiff in your research, please cite:
+If you use SSD in your research, please cite:
 
 > Plisiecki, H., Lenartowicz, P., Pokropek, A., Malyska, K., & Flakus, M. (2025). Measuring Individual Differences in Meaning: The Supervised Semantic Differential. *PsyArXiv*. https://doi.org/10.31234/osf.io/gvrsb_v1
 

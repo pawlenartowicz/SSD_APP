@@ -33,7 +33,6 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QSettings, QEvent, QTimer, QRect, QSize, QPoint
 from PySide6.QtGui import QPen, QColor, QMouseEvent
 
-from .. import EDITION
 from ..models.project import Project
 from ..utils.validators import Validator
 from ..utils.worker_threads import PreprocessWorker, EmbeddingWorker, KvConvertWorker, SpacyDownloadWorker, find_local_model
@@ -307,14 +306,11 @@ class Stage1Widget(QWidget):
         lang_layout = QVBoxLayout()
         lang_layout.addWidget(QLabel("Language:"))
         self.language_combo = QComboBox()
-        _langs = [
+        self.language_combo.addItems([
             "en", "ca", "da", "de", "el", "es", "fr", "hr", "it",
-            "lt", "mk", "nb", "nl", "pl", "pt", "ro",
-            "ru", "sl", "sv", "uk",
-        ]
-        if EDITION == "full":
-            _langs += ["ja", "ko", "zh"]
-        self.language_combo.addItems(sorted(_langs))
+            "ja", "ko", "lt", "mk", "nb", "nl", "pl", "pt", "ro",
+            "ru", "sl", "sv", "uk", "zh",
+        ])
         self.language_combo.currentTextChanged.connect(self._on_language_changed)
         lang_layout.addWidget(self.language_combo)
         model_row.addLayout(lang_layout)
@@ -1074,10 +1070,6 @@ class Stage1Widget(QWidget):
             "uk": ["uk_core_news_sm", "uk_core_news_md", "uk_core_news_lg"],
             "zh": ["zh_core_web_sm", "zh_core_web_md", "zh_core_web_lg"],
         }
-        # Asian languages only available in the "full" edition
-        if EDITION != "full":
-            for code in ("ja", "ko", "zh"):
-                models.pop(code, None)
 
         self.model_combo.addItems(models.get(language, ["en_core_web_sm"]))
 
@@ -1589,16 +1581,17 @@ class Stage1Widget(QWidget):
         # Analysis config check
         if hasattr(self, 'continuous_radio'):
             if self.continuous_radio.isChecked():
-                if self.project._cached_y is not None:
-                    col = self.outcome_col_combo.currentText()
+                col = self.outcome_col_combo.currentText()
+                if self.project._cached_y is not None and col and col != "(none)":
                     checks.append(("Analysis", True, f"Continuous - {col}"))
                 else:
                     checks.append(("Analysis", False, "No outcome column selected"))
             else:
+                col = self.group_col_combo.currentText()
                 if (self.project._cached_groups is not None
                         and len(self.project._cached_groups) > 0
-                        and len(np.unique(self.project._cached_groups)) >= 2):
-                    col = self.group_col_combo.currentText()
+                        and len(np.unique(self.project._cached_groups)) >= 2
+                        and col and col != "(none)"):
                     checks.append(("Analysis", True, f"Crossgroup - {col}"))
                 else:
                     checks.append(("Analysis", False, "No group column selected"))
