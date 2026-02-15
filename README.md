@@ -252,3 +252,13 @@ If you use SSD in your research, please cite:
 ## License
 
 [Add license information here]
+
+## Questions / Contributions
+- File issues and feature requests on the repo’s Issues page.
+- Pull requests welcome — especially for:
+  - Documentation improvements
+
+Contact: hplisiecki@gmail.com
+
+Project was funded by the National Science Centre, Poland (grant no. 2020/38/E/HS6/00302).
+
