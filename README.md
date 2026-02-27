@@ -17,7 +17,7 @@
 
 SSD finds interpretable semantic dimensions in text data that are associated with a continuous outcome variable or categorical group labels.
 
-Given a corpus of texts with associated numeric scores or group memberships, SSD identifies the direction through word-embedding space that best explains variation in the outcome. The result is a semantic dimension with two interpretable poles — one associated with high outcomes, the other with low — complete with thematic clusters, example sentences, and statistical validation.
+Given a corpus of texts with associated numeric scores or group memberships, SSD identifies the direction through word-embedding space that best explains variation in the outcome. The result is a semantic dimension with two interpretable poles one associated with high outcomes, the other with low; complete with thematic clusters, example sentences, and statistical validation.
 
 This application is the GUI frontend for the [ssdiff](https://github.com/hplisiecki/Supervised-Semantic-Differential) Python package.
 
