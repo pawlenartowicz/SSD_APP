@@ -137,6 +137,11 @@ a = Analysis(
 
         # Export
         'docx',
+        'openpyxl',
+        'openpyxl.cell',
+        'openpyxl.styles',
+        'openpyxl.utils',
+        'et_xmlfile',
 
         # Networking (used by ssdiff.preprocess for spaCy model downloads)
         'requests',
@@ -197,33 +202,42 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    [],
-    name='SSD',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=(sys.platform != 'win32'),
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=(sys.platform == 'darwin'),
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=app_icon,
-)
-
-# macOS: create .app bundle
 if sys.platform == 'darwin':
-    app = BUNDLE(
+    # macOS: onedir mode — files live inside the .app bundle alongside the binary.
+    # Faster launch, better Gatekeeper/security compatibility.
+    exe = EXE(
+        pyz,
+        a.scripts,
+        exclude_binaries=True,
+        name='SSD',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=True,
+        upx=True,
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=True,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=app_icon,
+    )
+
+    coll = COLLECT(
         exe,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        strip=True,
+        upx=True,
+        upx_exclude=[],
+        name='SSD',
+    )
+
+    app = BUNDLE(
+        coll,
         name='SSD.app',
         icon=app_icon,
         bundle_identifier='com.ssd.app',
@@ -231,4 +245,29 @@ if sys.platform == 'darwin':
             'CFBundleShortVersionString': '1.1.0',
             'NSHighResolutionCapable': True,
         },
+    )
+
+else:
+    # Windows / Linux: onefile mode — single executable, no separate folder needed.
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        [],
+        name='SSD',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=(sys.platform != 'win32'),
+        upx=True,
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=app_icon,
     )
