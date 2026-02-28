@@ -1,9 +1,11 @@
 """Entry point for SSD application."""
 
 import sys
+import multiprocessing
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 from ssdiff_gui import __version__
 from ssdiff_gui.views.main_window import MainWindow
@@ -14,6 +16,8 @@ from ssdiff_gui.utils.linux_install import register as _linux_register
 
 def main():
     """Main entry point."""
+    multiprocessing.freeze_support()
+
     # Enable high DPI scaling
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
@@ -43,9 +47,36 @@ def main():
     # Register desktop entry + icon on Linux (silent no-op elsewhere)
     _linux_register(palette, theme_name)
 
+    # Single-instance guard — if another copy is already running, bring it to
+    # the front and exit this one instead of opening a second window.
+    _SOCKET_NAME = "SSD_single_instance"
+    socket = QLocalSocket()
+    socket.connectToServer(_SOCKET_NAME)
+    if socket.waitForConnected(300):
+        # Another instance is running — ask it to raise its window and quit.
+        socket.write(b"raise")
+        socket.flush()
+        socket.disconnectFromServer()
+        sys.exit(0)
+
+    server = QLocalServer()
+    QLocalServer.removeServer(_SOCKET_NAME)  # clean up any stale socket
+    server.listen(_SOCKET_NAME)
+
     # Create and show main window
     window = MainWindow()
     window.show()
+
+    def _on_new_connection():
+        conn = server.nextPendingConnection()
+        conn.waitForReadyRead(200)
+        conn.readAll()  # consume the message
+        conn.disconnectFromServer()
+        window.setWindowState(window.windowState() & ~Qt.WindowMinimized)
+        window.raise_()
+        window.activateWindow()
+
+    server.newConnection.connect(_on_new_connection)
 
     # Prompt for projects directory on first launch
     window.check_first_run_settings()
