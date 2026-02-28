@@ -81,7 +81,15 @@ def main():
     # Prompt for projects directory on first launch
     window.check_first_run_settings()
 
-    sys.exit(app.exec())
+    ret = app.exec()
+    # Explicitly delete Qt objects while Python is still fully alive.
+    # Without this, sys.exit() triggers Python shutdown before Qt finishes
+    # destroying widgets, causing callbacks into partially-torn-down Python
+    # objects and a SIGSEGV crash on macOS.
+    del window
+    del server
+    del app
+    sys.exit(ret)
 
 
 if __name__ == "__main__":
