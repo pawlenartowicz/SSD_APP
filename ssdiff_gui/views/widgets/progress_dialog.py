@@ -3,6 +3,7 @@
 import json
 import math
 import random
+import sys
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -21,7 +22,11 @@ from PySide6.QtCore import Qt, QTimer, QElapsedTimer
 
 def _load_quotes():
     """Load quotes from the bundled quotes.json file."""
-    quotes_path = Path(__file__).resolve().parents[2] / "resources" / "quotes.json"
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        # PyInstaller extracts 'ssdiff_gui/resources' → '_MEIPASS/resources'
+        quotes_path = Path(sys._MEIPASS) / "resources" / "quotes.json"
+    else:
+        quotes_path = Path(__file__).resolve().parents[2] / "resources" / "quotes.json"
     try:
         with open(quotes_path, "r", encoding="utf-8") as f:
             return json.load(f)

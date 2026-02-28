@@ -284,6 +284,10 @@ class AppearanceDialog(QDialog):
             if icon:
                 app.setWindowIcon(icon)
 
+            # Re-register Linux desktop icon with new theme colours
+            from ..utils.linux_install import register as _linux_register
+            _linux_register(palette, self._selected_theme, force=True)
+
         # Refresh the welcome-page logo if the main window is the parent
         main_win = self.parent()
         if main_win and hasattr(main_win, "_refresh_welcome_logo"):

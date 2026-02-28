@@ -30,6 +30,13 @@ if sys.platform == 'win32':
                 for dll in mkl_dir.glob(pattern):
                     mkl_binaries.append((str(dll), '.'))
 
+# On Linux, bundle libexpat.so from the build environment so pyexpat.so gets
+# the same version it was compiled against (≥2.6.0) rather than the system one.
+if sys.platform == 'linux':
+    for pattern in ['libexpat.so.1*', 'libexpat.so.1']:
+        for lib in (Path(sys.prefix) / 'lib').glob(pattern):
+            mkl_binaries.append((str(lib), '.'))
+
 # Icon: .ico on Windows, .icns on macOS, None on Linux
 if sys.platform == 'win32':
     app_icon = 'ssdiff_gui/resources/icon.ico'
