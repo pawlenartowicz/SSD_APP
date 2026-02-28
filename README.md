@@ -25,9 +25,9 @@ This application is the GUI frontend for the [ssdiff](https://github.com/hplisie
 
 ## Download
 
-A pre-built Windows executable is available on the [Releases](https://github.com/hplisiecki/SSD_APP/releases/latest) page. No Python installation required — just download **SSD.exe** and run it.
+Pre-built binaries for **Windows, Linux, and macOS** are available on the [Releases](https://github.com/hplisiecki/SSD_APP/releases/latest) page. No Python installation required — just download the binary for your platform and run it.
 
-The first startup will be quite slow because the APP has to set itself up, and you will have to click through a couple Windows security messages - the only way to avoid this from my side is to pay Microsoft for a license, which I am not ready to do at the moment.
+The first startup will be quite slow because the app has to set itself up. On Windows you will also have to click through a couple of security messages — the only way to avoid this from my side is to pay Microsoft for a license, which I am not ready to do at the moment.
 
 spaCy language models are downloaded automatically on first use.
 
