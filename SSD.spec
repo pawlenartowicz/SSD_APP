@@ -217,8 +217,9 @@ def _is_unwanted_qt(name):
         m = re.match(pat, basename)
         if m and m.group(1) not in _qt_keep:
             return True
-    # ICU / avcodec / avformat / avutil — only needed by WebEngine / Multimedia
-    if re.match(r'lib(icu|avcodec|avformat|avutil|swresample)', basename):
+    # avcodec / avformat / avutil — only needed by WebEngine / Multimedia
+    # NOTE: ICU libs (libicu*) must NOT be excluded — QtCore depends on them
+    if re.match(r'lib(avcodec|avformat|avutil|swresample)', basename):
         return True
     return False
 
