@@ -62,18 +62,11 @@ The app includes a **built-in tutorial** accessible from the menu bar. It covers
 
 ## Supported Languages
 
-SSD supports 23 languages via spaCy models (small, medium, and large variants available for each):
+SSD supports 20 languages via spaCy NLP models:
 
-| Code | Language | Code | Language | Code | Language |
-|-----|---------|------|----------|------|----------|
-| `ca` | Catalan | `hr` | Croatian | `pl` | Polish |
-| `da` | Danish  | `it` | Italian | `pt` | Portuguese |
-| `de` | German  | `ja` | Japanese | `ro` | Romanian |
-| `el` | Greek   | `ko` | Korean | `ru` | Russian |
-| `en` | English | `lt` | Lithuanian | `sl` | Slovenian |
-| `es` | Spanish | `mk` | Macedonian | `sv` | Swedish |
-| `fr` | French  | `nb` | Norwegian | `uk` | Ukrainian |
-| `nl` | Dutch | `zh` | Chinese |
+Catalan, Croatian, Danish, Dutch, English, French, German, Greek, Italian, Lithuanian, Macedonian, Norwegian, Polish, Portuguese, Romanian, Russian, Slovenian, Spanish, Swedish, Ukrainian
+
+You can also use any custom spaCy model — enter a model name or local path in the Setup stage.
 
 ---
 

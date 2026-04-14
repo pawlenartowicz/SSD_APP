@@ -2,9 +2,9 @@ name: Tests
 
 on:
   push:
-    branches: [main, dev]
+    branches: [master, main, dev]
   pull_request:
-    branches: [main, dev]
+    branches: [master, main, dev]
 
 jobs:
   test:
@@ -27,7 +27,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pytest pytest-timeout
-          pip install ssdiff pandas numpy openpyxl
+          pip install -e .
 
       - name: Download spaCy model
         run: python -m spacy download en_core_web_sm
