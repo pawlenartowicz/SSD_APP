@@ -3,7 +3,6 @@
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 from PySide6.QtWidgets import (
@@ -17,36 +16,34 @@ from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
     QSpinBox,
-    QDoubleSpinBox,
-    QRadioButton,
-    QButtonGroup,
     QFileDialog,
     QMessageBox,
-    QProgressBar,
     QScrollArea,
     QFrame,
-    QSizePolicy,
     QApplication,
-    QStyledItemDelegate,
-    QStyle,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QRadioButton,
+    QButtonGroup,
 )
-from PySide6.QtCore import Qt, Signal, QSettings, QEvent, QTimer, QRect, QSize, QPoint
-from PySide6.QtGui import QPen, QColor, QMouseEvent
+from PySide6.QtCore import Qt, Signal
 
 from ..models.project import Project
-from ..utils.validators import Validator
-from ..utils.worker_threads import PreprocessWorker, EmbeddingWorker, KvConvertWorker, SpacyDownloadWorker, find_local_model
+from ..utils.worker_threads import PreprocessWorker, EmbeddingPrepareWorker, EmbeddingLoadWorker, SpacyDownloadWorker, find_local_model
 from ..utils.file_io import ProjectIO
-from .widgets.collapsible_box import CollapsibleBox
+from ..utils.settings import app_settings
 from .widgets.progress_dialog import ProgressDialog
-from .widgets.info_button import InfoButton
-from .widgets.removable_delegate import RemovableItemDelegate as _RemovableItemDelegate
+from .widgets.overlay_info_mixin import OverlayInfoMixin
 
 
-class Stage1Widget(QWidget):
+class Stage1Widget(OverlayInfoMixin, QWidget):
     """Stage 1: Setup - Dataset, spaCy, Embeddings, Hyperparameters."""
 
     stage_complete = Signal()
+
+    _info_margin_right = 6
+    _info_margin_top = 20
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -54,33 +51,16 @@ class Stage1Widget(QWidget):
         self._df: Optional[pd.DataFrame] = None
         self._worker = None
         self.next_btn = None  # Created in _create_navigation
-        self._settings = QSettings("SSD", "SSD")
+        self._settings = app_settings()
+        self._custom_stopwords: list = []  # loaded from file in custom stopword mode
 
-        self._overlay_info_buttons: list = []
+        self._init_overlay_info()
         self._setup_ui()
 
-    # -- overlay info glyphs on QGroupBoxes ----------------------------
-
-    def _add_overlay_info(self, widget, tooltip_html: str):
-        """Pin an InfoButton to the top-right corner of *widget*."""
-        btn = InfoButton(tooltip_html, parent=widget)
-        widget.installEventFilter(self)
-        self._overlay_info_buttons.append((widget, btn))
-        QTimer.singleShot(0, lambda w=widget, b=btn: self._reposition_info(w, b))
-
     def eventFilter(self, obj, event):
-        if event.type() in (QEvent.Resize, QEvent.LayoutRequest):
-            for widget, btn in self._overlay_info_buttons:
-                if obj is widget:
-                    self._reposition_info(widget, btn)
-                    break
+        if self._overlay_info_event_filter(obj, event):
+            return True
         return super().eventFilter(obj, event)
-
-    @staticmethod
-    def _reposition_info(widget, btn):
-        x = widget.width() - btn.width() - 6
-        btn.move(x, 20)
-        btn.raise_()
 
     def _setup_ui(self):
         """Set up the user interface."""
@@ -116,12 +96,6 @@ class Stage1Widget(QWidget):
         mid_row.addWidget(self._create_spacy_section())
         mid_row.addWidget(self._create_embeddings_section())
         layout.addLayout(mid_row)
-
-        # 4. Analysis configuration
-        self._create_analysis_section(layout)
-
-        # 5. Hyperparameters section (collapsible)
-        self._create_hyperparams_section(layout)
 
         # Ready indicator
         self._create_ready_indicator(layout)
@@ -185,6 +159,7 @@ class Stage1Widget(QWidget):
         text_col_layout = QVBoxLayout()
         text_col_layout.addWidget(QLabel("Text Column:"))
         self.text_col_combo = QComboBox()
+        self.text_col_combo.currentTextChanged.connect(self._on_text_column_changed)
         text_col_layout.addWidget(self.text_col_combo)
         cols_layout.addLayout(text_col_layout)
 
@@ -223,9 +198,7 @@ class Stage1Widget(QWidget):
             "Then select the relevant columns:<br>"
             "<b>Text Column</b> — the column with the texts to analyse.<br>"
             "<b>ID Column</b> (optional) — groups multiple rows per participant "
-            "into a single profile.<br>"
-            "<b>Outcome / Group Column</b> — the dependent variable "
-            "(continuous or categorical).<br><br>"
+            "into a single profile.<br><br>"
             "<b>Encoding</b> — the character encoding of your CSV/TSV file. "
             "Use <i>UTF-8</i> for most files. If you see garbled characters "
             "or a load error, try <i>Latin-1</i> (common for Western-European "
@@ -239,48 +212,97 @@ class Stage1Widget(QWidget):
     def _create_spacy_section(self):
         """Create the spaCy text processing section."""
         group = QGroupBox("2. Text Processing (spaCy)")
-        layout = QVBoxLayout()
+        outer = QVBoxLayout()
 
-        # Language and model selection
-        model_row = QHBoxLayout()
+        # --- Model mode toggle ---
+        mode_row = QHBoxLayout()
+        self.radio_language = QRadioButton("Language")
+        self.radio_language.setChecked(True)
+        self.radio_custom = QRadioButton("Custom model")
+        self._model_mode_group = QButtonGroup(self)
+        self._model_mode_group.addButton(self.radio_language)
+        self._model_mode_group.addButton(self.radio_custom)
+        mode_row.addWidget(self.radio_language)
+        mode_row.addWidget(self.radio_custom)
+        mode_row.addStretch()
+        outer.addLayout(mode_row)
 
-        lang_layout = QVBoxLayout()
-        lang_layout.addWidget(QLabel("Language:"))
+        # --- Language mode widgets (shown by default) ---
+        self.language_row = QWidget()
+        lang_layout = QHBoxLayout(self.language_row)
+        lang_layout.setContentsMargins(20, 0, 0, 0)
+
         self.language_combo = QComboBox()
-        self.language_combo.addItems([
-            "en", "ca", "da", "de", "el", "es", "fr", "hr", "it",
-            "ja", "ko", "lt", "mk", "nb", "nl", "pl", "pt", "ro",
-            "ru", "sl", "sv", "uk", "zh",
-        ])
-        self.language_combo.currentTextChanged.connect(self._on_language_changed)
+        self.language_combo.setMinimumWidth(140)
+        try:
+            from ssdiff.lang_config import LANGUAGES, _ALIASES
+            code_to_name = {v: k.replace("_", " ").title() for k, v in _ALIASES.items()}
+            items = [(code_to_name.get(c, c), c) for c in sorted(LANGUAGES.keys())]
+        except ImportError:
+            items = [
+                ("Catalan", "ca"), ("Danish", "da"), ("German", "de"),
+                ("Greek", "el"), ("English", "en"), ("Spanish", "es"),
+                ("French", "fr"), ("Croatian", "hr"), ("Italian", "it"),
+                ("Lithuanian", "lt"), ("Macedonian", "mk"), ("Norwegian", "nb"),
+                ("Dutch", "nl"), ("Polish", "pl"), ("Portuguese", "pt"),
+                ("Romanian", "ro"), ("Russian", "ru"), ("Slovenian", "sl"),
+                ("Swedish", "sv"), ("Ukrainian", "uk"),
+            ]
+        for display, code in items:
+            self.language_combo.addItem(display, userData=code)
+        self.language_combo.currentIndexChanged.connect(self._on_language_changed)
         lang_layout.addWidget(self.language_combo)
-        model_row.addLayout(lang_layout)
 
-        model_layout = QVBoxLayout()
-        model_layout.addWidget(QLabel("spaCy Model:"))
-        self.model_combo = QComboBox()
-        self._update_model_options("en")
-        model_layout.addWidget(self.model_combo)
-        model_row.addLayout(model_layout)
+        self.auto_model_label = QLabel("")
+        self.auto_model_label.setStyleSheet("color: gray; font-style: italic;")
+        lang_layout.addWidget(self.auto_model_label)
+        lang_layout.addStretch()
 
-        model_row.addStretch()
-        layout.addLayout(model_row)
+        outer.addWidget(self.language_row)
 
-        # Preprocessing options
-        options_layout = QHBoxLayout()
+        en_idx = self.language_combo.findData("en")
+        if en_idx >= 0:
+            self.language_combo.setCurrentIndex(en_idx)
+        self._update_auto_model_label(self.language_combo.currentData() or "en")
 
-        self.lemmatize_check = QCheckBox("Lemmatize tokens")
-        self.lemmatize_check.setChecked(True)
-        options_layout.addWidget(self.lemmatize_check)
+        # --- Custom model widgets (hidden by default) ---
+        self.custom_row = QWidget()
+        custom_layout = QHBoxLayout(self.custom_row)
+        custom_layout.setContentsMargins(20, 0, 0, 0)
 
-        self.remove_stopwords_check = QCheckBox("Remove stopwords")
-        self.remove_stopwords_check.setChecked(True)
-        options_layout.addWidget(self.remove_stopwords_check)
+        self.custom_model_input = QLineEdit()
+        self.custom_model_input.setPlaceholderText("Model name (e.g. en_core_web_lg) or path")
+        custom_layout.addWidget(self.custom_model_input)
+        custom_layout.addStretch()
 
-        options_layout.addStretch()
-        layout.addLayout(options_layout)
+        self.custom_row.setVisible(False)
+        outer.addWidget(self.custom_row)
 
-        # Preprocess button and progress
+        self.radio_language.toggled.connect(self._on_model_mode_changed)
+
+        # --- Stopwords ---
+        stop_row = QHBoxLayout()
+        stop_row.addWidget(QLabel("Stopwords:"))
+
+        self.stopword_combo = QComboBox()
+        self.stopword_combo.addItems(["Default", "Do not remove", "Custom file"])
+        self.stopword_combo.currentIndexChanged.connect(self._on_stopword_mode_changed)
+        stop_row.addWidget(self.stopword_combo)
+
+        self.stopword_file_btn = QPushButton("Browse...")
+        self.stopword_file_btn.setVisible(False)
+        self.stopword_file_btn.clicked.connect(self._browse_stopword_file)
+        stop_row.addWidget(self.stopword_file_btn)
+
+        self.stopword_file_label = QLabel("")
+        self.stopword_file_label.setStyleSheet("color: gray;")
+        self.stopword_file_label.setVisible(False)
+        stop_row.addWidget(self.stopword_file_label)
+
+        stop_row.addStretch()
+        outer.addLayout(stop_row)
+
+        # --- Preprocess button ---
         preprocess_row = QHBoxLayout()
         preprocess_row.addStretch()
 
@@ -289,589 +311,154 @@ class Stage1Widget(QWidget):
         self.preprocess_btn.setEnabled(False)
         preprocess_row.addWidget(self.preprocess_btn)
 
-        layout.addLayout(preprocess_row)
+        outer.addLayout(preprocess_row)
 
         # Status
         self.spacy_status = QLabel("")
-        layout.addWidget(self.spacy_status)
+        outer.addWidget(self.spacy_status)
 
-        group.setLayout(layout)
+        group.setLayout(outer)
         self._add_overlay_info(group,
             "<b>Text Processing</b><br><br>"
-            "Select a spaCy language model, then click <b>Preprocess</b> "
-            "to tokenize, lemmatize, and sentence-split your texts.<br><br>"
-            "After preprocessing, statistics are shown: total sentences, "
-            "mean words per document, and how many sentences were kept "
-            "after short-sentence filtering.",
+            "Choose a <b>language</b> (model auto-resolved) or specify a "
+            "<b>custom spaCy model</b> name/path.<br><br>"
+            "Stopwords can be left at default (resolved per language), "
+            "disabled, or loaded from a custom file.<br><br>"
+            "Click <b>Preprocess</b> to tokenize, lemmatize, and "
+            "sentence-split your texts.",
         )
         return group
 
+    def _update_auto_model_label(self, lang: str):
+        """Show the auto-resolved model name for the selected language."""
+        try:
+            from ssdiff.lang_config import lang_to_model
+            model = lang_to_model(lang)
+        except (ImportError, KeyError):
+            model = f"{lang}_core_news_lg"
+        self.auto_model_label.setText(f"→ {model}")
+
+    def _on_model_mode_changed(self, language_checked: bool):
+        """Toggle between Language and Custom model modes."""
+        self.language_row.setVisible(language_checked)
+        self.custom_row.setVisible(not language_checked)
+
+    def _on_stopword_mode_changed(self, index: int):
+        """Show/hide the custom stopword file controls."""
+        is_custom = (index == 2)  # "Custom file"
+        self.stopword_file_btn.setVisible(is_custom)
+        self.stopword_file_label.setVisible(is_custom)
+
+    def _browse_stopword_file(self):
+        """Open file dialog to select a custom stopwords file (one word per line)."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Select Stopwords File", "",
+            "Text files (*.txt);;All files (*)",
+        )
+        if not filepath:
+            return
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                words = [line.strip() for line in f if line.strip()]
+            self._custom_stopwords = words
+            self.stopword_file_label.setText(f"{len(words)} words loaded")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to read stopwords file:\n{e}")
+            self._custom_stopwords = []
+            self.stopword_file_label.setText("")
+
     def _create_embeddings_section(self):
-        """Create the embeddings configuration section."""
+        """Create the embedding management section with prepare + select workflow."""
         group = QGroupBox("3. Word Embeddings")
         layout = QVBoxLayout()
 
-        # File selection
+        # --- Top: Prepare Embeddings ---
+        prepare_group = QGroupBox("Prepare Embeddings")
+        prepare_layout = QVBoxLayout()
+
+        # Source file selection
         file_row = QHBoxLayout()
-        file_row.addWidget(QLabel("Embeddings File:"))
-        self.emb_path_combo = QComboBox()
-        self.emb_path_combo.setEditable(False)
-        self.emb_path_combo.setMinimumWidth(200)
-        self.emb_path_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.emb_path_combo.setMinimumContentsLength(20)
-        self.emb_path_combo.view().setTextElideMode(Qt.ElideMiddle)
-        self._emb_delegate = _RemovableItemDelegate(
-            self.emb_path_combo, self._remove_recent_embedding, parent=self.emb_path_combo,
-        )
-        self.emb_path_combo.setItemDelegate(self._emb_delegate)
-        self._populate_recent_embeddings()
-        self.emb_path_combo.currentIndexChanged.connect(self._on_emb_combo_changed)
-        file_row.addWidget(self.emb_path_combo, stretch=1)
+        file_row.addWidget(QLabel("Source File:"))
+        self.emb_source_path = QLineEdit()
+        self.emb_source_path.setPlaceholderText("Select embeddings file (.ssdembed, .bin, .txt, .kv, .vec, .gz)")
+        self.emb_source_path.setReadOnly(True)
+        file_row.addWidget(self.emb_source_path, stretch=1)
 
         browse_emb_btn = QPushButton("Browse...")
-        browse_emb_btn.clicked.connect(self._browse_embeddings)
+        browse_emb_btn.clicked.connect(self._browse_embeddings_source)
         file_row.addWidget(browse_emb_btn)
-        layout.addLayout(file_row)
+        prepare_layout.addLayout(file_row)
 
-        # Normalization options
+        # Normalization row
         norm_row = QHBoxLayout()
-
-        self.l2_norm_check = QCheckBox("L2 normalize embeddings")
-        self.l2_norm_check.setChecked(True)
-        norm_row.addWidget(self.l2_norm_check)
-
-        self.abtt_check = QCheckBox("Apply ABTT (All-But-The-Top)")
-        self.abtt_check.setChecked(True)
-        self.abtt_check.toggled.connect(self._on_abtt_toggled)
-        norm_row.addWidget(self.abtt_check)
-
-        abtt_m_layout = QHBoxLayout()
-        abtt_m_layout.addWidget(QLabel("ABTT m:"))
-        self.abtt_m_spin = QSpinBox()
-        self.abtt_m_spin.setRange(0, 10)
-        self.abtt_m_spin.setValue(1)
-        abtt_m_layout.addWidget(self.abtt_m_spin)
-        norm_row.addLayout(abtt_m_layout)
-
+        self.l2_check = QCheckBox("L2 Normalize")
+        self.l2_check.setChecked(True)
+        norm_row.addWidget(self.l2_check)
+        norm_row.addWidget(QLabel("ABTT:"))
+        self.abtt_spin = QSpinBox()
+        self.abtt_spin.setRange(0, 10)
+        self.abtt_spin.setValue(1)
+        norm_row.addWidget(self.abtt_spin)
         norm_row.addStretch()
-        layout.addLayout(norm_row)
+        self.prepare_btn = QPushButton("Load && Prepare")
+        self.prepare_btn.setEnabled(False)
+        self.prepare_btn.clicked.connect(self._prepare_embedding)
+        norm_row.addWidget(self.prepare_btn)
+        prepare_layout.addLayout(norm_row)
 
-        # Load button
-        load_row = QHBoxLayout()
-        load_row.addStretch()
+        self.prepare_status = QLabel("")
+        prepare_layout.addWidget(self.prepare_status)
+        prepare_group.setLayout(prepare_layout)
+        layout.addWidget(prepare_group)
 
-        self.load_emb_btn = QPushButton("Load Embeddings")
-        self.load_emb_btn.clicked.connect(self._load_embeddings)
-        self.load_emb_btn.setEnabled(False)
-        load_row.addWidget(self.load_emb_btn)
+        # --- Bottom: Prepared Embeddings Table ---
+        select_group = QGroupBox("Prepared Embeddings")
+        select_layout = QVBoxLayout()
 
-        layout.addLayout(load_row)
+        self.emb_table = QTableWidget()
+        self.emb_table.setColumnCount(6)
+        self.emb_table.setHorizontalHeaderLabels([
+            "Name", "Vocab", "Dim", "L2", "ABTT", "Size (MB)",
+        ])
+        self.emb_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in range(1, 6):
+            self.emb_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        self.emb_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.emb_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.emb_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.emb_table.setAlternatingRowColors(True)
+        self.emb_table.setMinimumHeight(120)
+        select_layout.addWidget(self.emb_table)
 
-        # Status
+        btn_row = QHBoxLayout()
+        self.select_emb_btn = QPushButton("Select")
+        self.select_emb_btn.setEnabled(False)
+        self.select_emb_btn.clicked.connect(self._select_embedding)
+        btn_row.addWidget(self.select_emb_btn)
+        self.delete_emb_btn = QPushButton("Delete")
+        self.delete_emb_btn.setEnabled(False)
+        self.delete_emb_btn.clicked.connect(self._delete_embedding)
+        btn_row.addWidget(self.delete_emb_btn)
+        btn_row.addStretch()
         self.emb_status = QLabel("")
-        layout.addWidget(self.emb_status)
+        self.emb_status.setObjectName("label_muted")
+        btn_row.addWidget(self.emb_status)
+        select_layout.addLayout(btn_row)
+
+        select_group.setLayout(select_layout)
+        layout.addWidget(select_group)
 
         group.setLayout(layout)
         self._add_overlay_info(group,
             "<b>Word Embeddings</b><br><br>"
-            "Choose a pre-trained word-embedding file (GloVe, word2vec, "
-            "or fastText format). Click <b>Load</b> to read it into memory "
-            "and compute vocabulary coverage against your preprocessed "
-            "corpus.<br><br>"
-            "Coverage tells you what percentage of your corpus tokens "
-            "are present in the embedding model.",
+            "<b>Prepare:</b> Select a source embedding file, configure L2 "
+            "normalization and ABTT, then click <i>Load &amp; Prepare</i>. "
+            "The embedding is normalized and saved as <code>.ssdembed</code> "
+            "to this project.<br><br>"
+            "<b>Select:</b> Choose a prepared embedding for analysis. "
+            "Exactly one embedding is loaded into RAM at a time.",
         )
         return group
-
-    def _create_analysis_section(self, parent_layout):
-        """Create the analysis configuration section."""
-        group = QGroupBox("4. Analysis")
-        layout = QVBoxLayout()
-        layout.setSpacing(6)
-
-        # Row 1: Analysis type radios + column combo + summary (all one row)
-        row1 = QHBoxLayout()
-
-        self.analysis_type_group = QButtonGroup()
-
-        self.continuous_radio = QRadioButton("Continuous Outcome")
-        self.continuous_radio.setChecked(True)
-        self.analysis_type_group.addButton(self.continuous_radio, 0)
-        row1.addWidget(self.continuous_radio)
-
-        self.crossgroup_radio = QRadioButton("Group Comparison")
-        self.analysis_type_group.addButton(self.crossgroup_radio, 1)
-        row1.addWidget(self.crossgroup_radio)
-
-        row1.addStretch()
-        layout.addLayout(row1)
-
-        # Row 2: Continuous outcome column
-        self.cont_row = QWidget()
-        self.cont_row.setAttribute(Qt.WA_StyledBackground, False)
-        self.cont_row.setStyleSheet("background: transparent;")
-        cont_layout = QHBoxLayout(self.cont_row)
-        cont_layout.setContentsMargins(0, 0, 0, 0)
-        cont_layout.addWidget(QLabel("Outcome Column:"))
-        self.outcome_col_combo = QComboBox()
-        self.outcome_col_combo.setMinimumWidth(180)
-        self.outcome_col_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.outcome_col_combo.addItem("(none)")
-        self.outcome_col_combo.currentIndexChanged.connect(self._on_outcome_column_changed)
-        cont_layout.addWidget(self.outcome_col_combo)
-
-        self.outcome_summary_label = QLabel("")
-        self.outcome_summary_label.setObjectName("label_muted")
-        cont_layout.addWidget(self.outcome_summary_label, stretch=1)
-
-        layout.addWidget(self.cont_row)
-
-        # Row 2b: Crossgroup column + n_perm (hidden by default)
-        self.cross_row = QWidget()
-        self.cross_row.setAttribute(Qt.WA_StyledBackground, False)
-        self.cross_row.setStyleSheet("background: transparent;")
-        cross_layout = QHBoxLayout(self.cross_row)
-        cross_layout.setContentsMargins(0, 0, 0, 0)
-        cross_layout.addWidget(QLabel("Group Column:"))
-        self.group_col_combo = QComboBox()
-        self.group_col_combo.setMinimumWidth(180)
-        self.group_col_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.group_col_combo.addItem("(none)")
-        self.group_col_combo.currentIndexChanged.connect(self._on_group_column_changed)
-        cross_layout.addWidget(self.group_col_combo)
-
-        cross_layout.addWidget(QLabel("Permutations:"))
-        self.n_perm_spin = QSpinBox()
-        self.n_perm_spin.setRange(100, 50000)
-        self.n_perm_spin.setValue(5000)
-        self.n_perm_spin.setSingleStep(500)
-        cross_layout.addWidget(self.n_perm_spin)
-
-        self.group_summary_label = QLabel("")
-        self.group_summary_label.setObjectName("label_muted")
-        cross_layout.addWidget(self.group_summary_label, stretch=1)
-
-        self.cross_row.setVisible(False)
-        layout.addWidget(self.cross_row)
-
-        # Connect analysis type toggle
-        self.continuous_radio.toggled.connect(self._on_analysis_type_changed)
-
-        # Row 3: Mode selection
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Mode:"))
-
-        self.mode_btn_group = QButtonGroup()
-
-        self.lexicon_radio = QRadioButton("Lexicon")
-        self.lexicon_radio.setChecked(True)
-        self.mode_btn_group.addButton(self.lexicon_radio, 0)
-        mode_row.addWidget(self.lexicon_radio)
-
-        self.fulldoc_radio = QRadioButton("Full Document")
-        self.mode_btn_group.addButton(self.fulldoc_radio, 1)
-        mode_row.addWidget(self.fulldoc_radio)
-
-        mode_row.addStretch()
-        layout.addLayout(mode_row)
-
-        # Connect mode toggle to adaptive advanced settings
-        self.lexicon_radio.toggled.connect(self._on_mode_changed)
-
-        group.setLayout(layout)
-        self._add_overlay_info(group,
-            "<b>Analysis</b><br><br>"
-            "<b>Type</b> — <i>Continuous Outcome</i> predicts a numeric "
-            "variable; <i>Group Comparison</i> contrasts two or more "
-            "categorical groups.<br>"
-            "<b>Mode</b> — <i>Full-Document</i> uses the entire text; "
-            "<i>Lexicon</i> restricts to a hand-picked word list; "
-            "<i>Hybrid</i> combines both approaches.",
-        )
-        parent_layout.addWidget(group)
-
-    def _on_analysis_type_changed(self, continuous_checked: bool):
-        """Handle analysis type radio toggle."""
-        self.cont_row.setVisible(continuous_checked)
-        self.cross_row.setVisible(not continuous_checked)
-        if continuous_checked:
-            self._on_outcome_column_changed()
-        else:
-            self._on_group_column_changed()
-        self._update_advanced_settings_visibility()
-        self._update_ready_indicator()
-
-    def _on_mode_changed(self, lexicon_checked: bool):
-        """Handle mode radio toggle."""
-        self._update_advanced_settings_visibility()
-        self._update_ready_indicator()
-
-    def _update_advanced_settings_visibility(self):
-        """Show/hide advanced settings groups based on analysis type and mode."""
-        if not hasattr(self, 'pca_group_widget'):
-            return
-        is_continuous = self.continuous_radio.isChecked()
-        is_lexicon = self.lexicon_radio.isChecked()
-
-        # PCA Dimensionality: visible only for continuous
-        self.pca_group_widget.setVisible(is_continuous)
-        # Context window size: visible only for lexicon mode
-        self.window_size_label.setVisible(is_lexicon)
-        self.window_size_spin.setVisible(is_lexicon)
-        # Unit beta: visible only for continuous
-        self.unit_beta_check.setVisible(is_continuous)
-
-    def _on_outcome_column_changed(self):
-        """Handle outcome column selection change."""
-        if not self.project or self.project._cached_df is None:
-            return
-        if not self.continuous_radio.isChecked():
-            return
-
-        col = self.outcome_col_combo.currentText()
-        if not col or col == "(none)":
-            self.outcome_summary_label.setText("")
-            self.project._cached_y = None
-            self._update_ready_indicator()
-            return
-
-        df = self.project._cached_df
-        if col not in df.columns:
-            self.outcome_summary_label.setText("")
-            self.project._cached_y = None
-            self._update_ready_indicator()
-            return
-
-        outcome = pd.to_numeric(df[col], errors="coerce")
-        id_row_indices = self.project._cached_id_row_indices
-
-        if id_row_indices is not None:
-            # Grouped mode: one outcome per unique ID (first non-NaN value)
-            y_list = []
-            for row_indices in id_row_indices:
-                vals = outcome.iloc[row_indices].dropna()
-                y_list.append(vals.iloc[0] if len(vals) > 0 else np.nan)
-            y_series = pd.Series(y_list)
-            n_valid = (~y_series.isna()).sum()
-            y = y_series.dropna().to_numpy()
-        else:
-            n_valid = (~outcome.isna()).sum()
-            y = outcome.dropna().to_numpy()
-
-        if n_valid > 0:
-            self.outcome_summary_label.setText(
-                f"n={n_valid:,}, mean={y.mean():.3f}, std={y.std():.3f}"
-            )
-            self.project._cached_y = y
-            self.project.dataset_config.outcome_column = col
-            self.project.dataset_config.n_valid = int(n_valid)
-            self._apply_outcome_filter()
-        else:
-            self.outcome_summary_label.setText("No valid numeric values")
-            self.project._cached_y = None
-
-        self._update_ready_indicator()
-
-    def _apply_outcome_filter(self):
-        """Filter cached docs to match rows/profiles with valid outcome."""
-        if not self.project or self.project._cached_df is None:
-            return
-
-        col = self.outcome_col_combo.currentText()
-        if not col or col not in self.project._cached_df.columns:
-            return
-
-        from ..utils.file_io import ProjectIO
-        cached = ProjectIO.load_preprocessed_docs(self.project)
-        if not cached:
-            return
-
-        all_pre_docs, all_docs, id_row_indices = cached
-        outcome = pd.to_numeric(self.project._cached_df[col], errors="coerce")
-
-        if id_row_indices is not None:
-            # Grouped: per-ID mask — an ID is valid if it has at least one
-            # non-NaN outcome value among its rows.
-            per_id_mask = [
-                any(not np.isnan(outcome.iloc[ri]) for ri in row_indices)
-                for row_indices in id_row_indices
-            ]
-            self.project._cached_docs = [all_docs[i] for i, ok in enumerate(per_id_mask) if ok]
-            self.project._cached_pre_docs = [all_pre_docs[i] for i, ok in enumerate(per_id_mask) if ok]
-        else:
-            mask = ~outcome.isna()
-            self.project._cached_docs = [all_docs[i] for i in range(len(all_docs)) if mask.iat[i]]
-            self.project._cached_pre_docs = [all_pre_docs[i] for i in range(len(all_pre_docs)) if mask.iat[i]]
-
-    def _on_group_column_changed(self):
-        """Handle group column selection change."""
-        if not self.project or self.project._cached_df is None:
-            return
-        if not self.crossgroup_radio.isChecked():
-            return
-
-        col = self.group_col_combo.currentText()
-        if not col or col == "(none)":
-            self.group_summary_label.setText("")
-            self.project._cached_groups = None
-            self._update_ready_indicator()
-            return
-
-        df = self.project._cached_df
-        if col not in df.columns:
-            self.group_summary_label.setText("")
-            self.project._cached_groups = None
-            self._update_ready_indicator()
-            return
-
-        id_row_indices = self.project._cached_id_row_indices
-
-        if id_row_indices is not None:
-            # Grouped: build per-ID group array (first non-empty value)
-            per_id_groups = []
-            for row_indices in id_row_indices:
-                vals = df[col].iloc[row_indices].dropna()
-                vals = vals[vals.astype(str).str.strip() != ""]
-                per_id_groups.append(str(vals.iloc[0]) if len(vals) > 0 else "")
-            groups = pd.Series(per_id_groups)
-        else:
-            groups = df[col].copy()
-
-        n_missing = groups.isna().sum() + (groups.astype(str).str.strip() == "").sum()
-        groups_clean = groups.dropna()
-        groups_clean = groups_clean[groups_clean.astype(str).str.strip() != ""]
-        unique = groups_clean.astype(str).unique()
-        n_groups = len(unique)
-
-        counts_str = ", ".join(
-            f"{g}: {(groups_clean.astype(str) == g).sum()}"
-            for g in sorted(unique)
-        )
-        summary = f"{n_groups} groups, n={len(groups_clean):,}"
-        if n_missing > 0:
-            summary += f" ({n_missing} dropped: NaN/empty)"
-        summary += f"  [{counts_str}]"
-        self.group_summary_label.setText(summary)
-
-        self.project._cached_groups = groups.to_numpy()
-        self.project.dataset_config.group_column = col
-
-        self._apply_group_filter()
-        self._update_ready_indicator()
-
-    def _apply_group_filter(self):
-        """Filter cached docs/profiles to match rows with valid groups."""
-        if not self.project or self.project._cached_df is None:
-            return
-
-        col = self.group_col_combo.currentText()
-        if not col or col not in self.project._cached_df.columns:
-            return
-
-        from ..utils.file_io import ProjectIO
-        cached = ProjectIO.load_preprocessed_docs(self.project)
-        if not cached:
-            return
-
-        all_pre_docs, all_docs, id_row_indices = cached
-
-        if id_row_indices is not None:
-            # Grouped: per-ID mask based on first non-empty group value
-            df = self.project._cached_df
-            per_id_valid = []
-            per_id_group_vals = []
-            for row_indices in id_row_indices:
-                vals = df[col].iloc[row_indices].dropna()
-                vals = vals[vals.astype(str).str.strip() != ""]
-                if len(vals) > 0:
-                    per_id_valid.append(True)
-                    per_id_group_vals.append(str(vals.iloc[0]))
-                else:
-                    per_id_valid.append(False)
-                    per_id_group_vals.append("")
-
-            self.project._cached_docs = [all_docs[i] for i, ok in enumerate(per_id_valid) if ok]
-            self.project._cached_pre_docs = [all_pre_docs[i] for i, ok in enumerate(per_id_valid) if ok]
-            self.project._cached_groups = np.array([g for g, ok in zip(per_id_group_vals, per_id_valid) if ok])
-        else:
-            groups = self.project._cached_df[col]
-            mask = ~(groups.isna() | (groups.astype(str).str.strip() == ""))
-            self.project._cached_docs = [all_docs[i] for i in range(len(all_docs)) if mask.iat[i]]
-            self.project._cached_pre_docs = [all_pre_docs[i] for i in range(len(all_pre_docs)) if mask.iat[i]]
-            self.project._cached_groups = groups[mask].astype(str).to_numpy()
-
-        self.project._cached_y = None
-
-    def _is_crossgroup(self) -> bool:
-        return self.crossgroup_radio.isChecked()
-
-    def _create_hyperparams_section(self, parent_layout):
-        """Create the hyperparameters section (collapsible)."""
-        self.hyperparams_box = CollapsibleBox("5. Advanced Settings (click to expand)")
-        content_layout = self.hyperparams_box.content_layout
-
-        # PCA settings
-        pca_group = QGroupBox("PCA Dimensionality")
-        pca_layout = QVBoxLayout()
-
-        pca_mode_row = QHBoxLayout()
-        self.pca_mode_group = QButtonGroup()
-
-        self.pca_auto_radio = QRadioButton("Auto (PCA sweep)")
-        self.pca_auto_radio.setChecked(True)
-        self.pca_mode_group.addButton(self.pca_auto_radio, 0)
-        pca_mode_row.addWidget(self.pca_auto_radio)
-
-        self.pca_manual_radio = QRadioButton("Manual:")
-        self.pca_mode_group.addButton(self.pca_manual_radio, 1)
-        pca_mode_row.addWidget(self.pca_manual_radio)
-
-        self.pca_k_spin = QSpinBox()
-        self.pca_k_spin.setRange(2, 500)
-        self.pca_k_spin.setValue(20)
-        self.pca_k_spin.setEnabled(False)
-        self.pca_manual_radio.toggled.connect(self.pca_k_spin.setEnabled)
-        pca_mode_row.addWidget(self.pca_k_spin)
-
-        pca_mode_row.addStretch()
-        pca_layout.addLayout(pca_mode_row)
-
-        sweep_row = QHBoxLayout()
-        sweep_row.addWidget(QLabel("Sweep K range:"))
-        self.sweep_k_min_spin = QSpinBox()
-        self.sweep_k_min_spin.setRange(1, 200)
-        self.sweep_k_min_spin.setValue(1)
-        sweep_row.addWidget(self.sweep_k_min_spin)
-        sweep_row.addWidget(QLabel("to"))
-        self.sweep_k_max_spin = QSpinBox()
-        self.sweep_k_max_spin.setRange(2, 500)
-        self.sweep_k_max_spin.setValue(80)
-        sweep_row.addWidget(self.sweep_k_max_spin)
-        sweep_row.addWidget(QLabel("step:"))
-        self.sweep_k_step_spin = QSpinBox()
-        self.sweep_k_step_spin.setRange(1, 50)
-        self.sweep_k_step_spin.setValue(1)
-        sweep_row.addWidget(self.sweep_k_step_spin)
-        sweep_row.addStretch()
-        pca_layout.addLayout(sweep_row)
-
-        sweep_row2 = QHBoxLayout()
-        sweep_row2.addWidget(QLabel("AUCK radius:"))
-        self.auck_radius_spin = QSpinBox()
-        self.auck_radius_spin.setRange(1, 20)
-        self.auck_radius_spin.setValue(3)
-        sweep_row2.addWidget(self.auck_radius_spin)
-
-        sweep_row2.addWidget(QLabel("Beta smooth window:"))
-        self.beta_smooth_win_spin = QSpinBox()
-        self.beta_smooth_win_spin.setRange(1, 31)
-        self.beta_smooth_win_spin.setValue(7)
-        sweep_row2.addWidget(self.beta_smooth_win_spin)
-
-        sweep_row2.addWidget(QLabel("Smooth kind:"))
-        self.beta_smooth_kind_combo = QComboBox()
-        self.beta_smooth_kind_combo.addItems(["median", "mean"])
-        sweep_row2.addWidget(self.beta_smooth_kind_combo)
-
-        self.weight_by_size_check = QCheckBox("Weight by cluster size")
-        self.weight_by_size_check.setChecked(True)
-        sweep_row2.addWidget(self.weight_by_size_check)
-
-        sweep_row2.addStretch()
-        pca_layout.addLayout(sweep_row2)
-
-        pca_group.setLayout(pca_layout)
-        self.pca_group_widget = pca_group
-        content_layout.addWidget(pca_group)
-
-        # Context settings
-        context_group = QGroupBox("Context Window")
-        context_layout = QHBoxLayout()
-
-        self.window_size_label = QLabel("Window size (+/-):")
-        context_layout.addWidget(self.window_size_label)
-        self.window_size_spin = QSpinBox()
-        self.window_size_spin.setRange(1, 20)
-        self.window_size_spin.setValue(3)
-        context_layout.addWidget(self.window_size_spin)
-
-        context_layout.addWidget(QLabel("SIF parameter (a):"))
-        self.sif_a_spin = QDoubleSpinBox()
-        self.sif_a_spin.setRange(1e-5, 1.0)
-        self.sif_a_spin.setDecimals(5)
-        self.sif_a_spin.setValue(1e-3)
-        self.sif_a_spin.setSingleStep(1e-4)
-        context_layout.addWidget(self.sif_a_spin)
-
-        context_layout.addStretch()
-        context_group.setLayout(context_layout)
-        content_layout.addWidget(context_group)
-
-        # Model settings
-        model_group = QGroupBox("Model Settings")
-        model_layout = QVBoxLayout()
-
-        model_row1 = QHBoxLayout()
-        self.unit_beta_check = QCheckBox("Use unit-length beta for interpretation")
-        self.unit_beta_check.setChecked(True)
-        model_row1.addWidget(self.unit_beta_check)
-
-        self.l2_docs_check = QCheckBox("L2 normalize document vectors")
-        self.l2_docs_check.setChecked(True)
-        model_row1.addWidget(self.l2_docs_check)
-        model_row1.addStretch()
-        model_layout.addLayout(model_row1)
-
-        model_group.setLayout(model_layout)
-        content_layout.addWidget(model_group)
-
-        # Clustering settings
-        cluster_group = QGroupBox("Clustering")
-        cluster_layout = QVBoxLayout()
-
-        cluster_row1 = QHBoxLayout()
-        cluster_row1.addWidget(QLabel("Top N neighbors:"))
-        self.cluster_topn_spin = QSpinBox()
-        self.cluster_topn_spin.setRange(20, 500)
-        self.cluster_topn_spin.setValue(100)
-        cluster_row1.addWidget(self.cluster_topn_spin)
-
-        self.cluster_k_auto_check = QCheckBox("Auto-select K (silhouette)")
-        self.cluster_k_auto_check.setChecked(True)
-        cluster_row1.addWidget(self.cluster_k_auto_check)
-        cluster_row1.addStretch()
-        cluster_layout.addLayout(cluster_row1)
-
-        cluster_row2 = QHBoxLayout()
-        cluster_row2.addWidget(QLabel("K range:"))
-        self.cluster_k_min_spin = QSpinBox()
-        self.cluster_k_min_spin.setRange(2, 50)
-        self.cluster_k_min_spin.setValue(2)
-        cluster_row2.addWidget(self.cluster_k_min_spin)
-        cluster_row2.addWidget(QLabel("to"))
-        self.cluster_k_max_spin = QSpinBox()
-        self.cluster_k_max_spin.setRange(3, 100)
-        self.cluster_k_max_spin.setValue(10)
-        cluster_row2.addWidget(self.cluster_k_max_spin)
-
-        cluster_row2.addStretch()
-        cluster_layout.addLayout(cluster_row2)
-
-        cluster_group.setLayout(cluster_layout)
-        content_layout.addWidget(cluster_group)
-
-        self._add_overlay_info(self.hyperparams_box,
-            "<b>Advanced Settings</b><br><br>"
-            "Fine-tune the SSD hyperparameters:<br>"
-            "<b>PCA</b> — auto-sweep or fix the number of components.<br>"
-            "<b>Context Window</b> — sentence window size for building "
-            "document vectors.<br>"
-            "<b>Model</b> — permutation count, minimum word frequency, "
-            "and SIF weighting.<br>"
-            "<b>Clustering</b> — number of semantic clusters and top-N "
-            "words per cluster.",
-        )
-        parent_layout.addWidget(self.hyperparams_box)
 
     def _create_ready_indicator(self, parent_layout):
         """Create the project ready indicator."""
@@ -914,113 +501,11 @@ class Stage1Widget(QWidget):
 
     # --- Helper methods ---
 
-    def _populate_recent_embeddings(self):
-        """Populate the embeddings combo from QSettings."""
-        self.emb_path_combo.blockSignals(True)
-        self.emb_path_combo.clear()
-        recent = self._settings.value("embeddings/recent_paths", [])
-        if not isinstance(recent, list):
-            recent = []
-        if recent:
-            for p in recent:
-                self.emb_path_combo.addItem(p)
-        else:
-            self.emb_path_combo.addItem("(no recent models)")
-            model = self.emb_path_combo.model()
-            item = model.item(0)
-            item.setEnabled(False)
-        self.emb_path_combo.blockSignals(False)
-
-    def _add_recent_embedding_path(self, path: str):
-        """Add a path to the recent embeddings list and refresh the combo."""
-        if not path:
-            return
-        recent = self._settings.value("embeddings/recent_paths", [])
-        if not isinstance(recent, list):
-            recent = []
-        if path in recent:
-            recent.remove(path)
-        recent.insert(0, path)
-        recent = recent[:10]
-        self._settings.setValue("embeddings/recent_paths", recent)
-
-        self.emb_path_combo.blockSignals(True)
-        self.emb_path_combo.clear()
-        for p in recent:
-            self.emb_path_combo.addItem(p)
-        idx = self.emb_path_combo.findText(path)
-        if idx >= 0:
-            self.emb_path_combo.setCurrentIndex(idx)
-        self.emb_path_combo.blockSignals(False)
-        self._on_emb_combo_changed()
-
-    def _remove_recent_embedding(self, row: int):
-        """Remove an embedding path from the recent list by combo row index."""
-        path = self.emb_path_combo.itemText(row)
-        if not path or path == "(no recent models)":
-            return
-
-        recent = self._settings.value("embeddings/recent_paths", [])
-        if not isinstance(recent, list):
-            recent = []
-        if path in recent:
-            recent.remove(path)
-        self._settings.setValue("embeddings/recent_paths", recent)
-
-        self.emb_path_combo.blockSignals(True)
-        self.emb_path_combo.removeItem(row)
-        if self.emb_path_combo.count() == 0:
-            self.emb_path_combo.addItem("(no recent models)")
-            model = self.emb_path_combo.model()
-            model.item(0).setEnabled(False)
-        self.emb_path_combo.blockSignals(False)
-        self._on_emb_combo_changed()
-
-    def _on_emb_combo_changed(self):
-        """Enable/disable Load button based on combo selection."""
-        text = self.emb_path_combo.currentText()
-        valid = bool(text) and text != "(no recent models)"
-        self.load_emb_btn.setEnabled(valid)
-
-    def _update_model_options(self, language: str):
-        """Update spaCy model options based on language."""
-        self.model_combo.clear()
-
-        models = {
-            "en": ["en_core_web_sm", "en_core_web_md", "en_core_web_lg"],
-            "ca": ["ca_core_news_sm", "ca_core_news_md", "ca_core_news_lg"],
-            "da": ["da_core_news_sm", "da_core_news_md", "da_core_news_lg"],
-            "de": ["de_core_news_sm", "de_core_news_md", "de_core_news_lg"],
-            "el": ["el_core_news_sm", "el_core_news_md", "el_core_news_lg"],
-            "es": ["es_core_news_sm", "es_core_news_md", "es_core_news_lg"],
-            "fr": ["fr_core_news_sm", "fr_core_news_md", "fr_core_news_lg"],
-            "hr": ["hr_core_news_sm", "hr_core_news_md", "hr_core_news_lg"],
-            "it": ["it_core_news_sm", "it_core_news_md", "it_core_news_lg"],
-            "ja": ["ja_core_news_sm", "ja_core_news_md", "ja_core_news_lg"],
-            "ko": ["ko_core_news_sm", "ko_core_news_md", "ko_core_news_lg"],
-            "lt": ["lt_core_news_sm", "lt_core_news_md", "lt_core_news_lg"],
-            "mk": ["mk_core_news_sm", "mk_core_news_md", "mk_core_news_lg"],
-            "nb": ["nb_core_news_sm", "nb_core_news_md", "nb_core_news_lg"],
-            "nl": ["nl_core_news_sm", "nl_core_news_md", "nl_core_news_lg"],
-            "pl": ["pl_core_news_sm", "pl_core_news_md", "pl_core_news_lg"],
-            "pt": ["pt_core_news_sm", "pt_core_news_md", "pt_core_news_lg"],
-            "ro": ["ro_core_news_sm", "ro_core_news_md", "ro_core_news_lg"],
-            "ru": ["ru_core_news_sm", "ru_core_news_md", "ru_core_news_lg"],
-            "sl": ["sl_core_news_sm", "sl_core_news_md", "sl_core_news_lg"],
-            "sv": ["sv_core_news_sm", "sv_core_news_md", "sv_core_news_lg"],
-            "uk": ["uk_core_news_sm", "uk_core_news_md", "uk_core_news_lg"],
-            "zh": ["zh_core_web_sm", "zh_core_web_md", "zh_core_web_lg"],
-        }
-
-        self.model_combo.addItems(models.get(language, ["en_core_web_sm"]))
-
-    def _on_language_changed(self, language: str):
-        """Handle language selection change."""
-        self._update_model_options(language)
-
-    def _on_abtt_toggled(self, checked: bool):
-        """Handle ABTT checkbox toggle."""
-        self.abtt_m_spin.setEnabled(checked)
+    def _on_language_changed(self, index: int):
+        """Update the auto-resolved model label when language changes."""
+        lang = self.language_combo.currentData()
+        if lang:
+            self._update_auto_model_label(lang)
 
     def _browse_csv(self):
         """Open file dialog to select data file."""
@@ -1064,22 +549,6 @@ class Stage1Widget(QWidget):
             self.id_col_combo.addItem("(none)")
             self.id_col_combo.addItems(columns)
 
-            # Populate analysis column combos
-            numeric_cols = self._df.select_dtypes(include="number").columns.tolist()
-            self.outcome_col_combo.blockSignals(True)
-            self.outcome_col_combo.clear()
-            self.outcome_col_combo.addItem("(none)")
-            self.outcome_col_combo.addItems(numeric_cols)
-            self.outcome_col_combo.setCurrentIndex(0)
-            self.outcome_col_combo.blockSignals(False)
-
-            self.group_col_combo.blockSignals(True)
-            self.group_col_combo.clear()
-            self.group_col_combo.addItem("(none)")
-            self.group_col_combo.addItems(columns)
-            self.group_col_combo.setCurrentIndex(0)
-            self.group_col_combo.blockSignals(False)
-
             # Show stats
             n_rows = len(self._df)
             n_cols = len(columns)
@@ -1090,12 +559,29 @@ class Stage1Widget(QWidget):
             self.validate_dataset_btn.setEnabled(True)
             self.preprocess_btn.setEnabled(True)
 
+            # New CSV = nothing validated yet
+            if self.project:
+                self.project._df = self._df
+                self.project.n_valid = 0
+                self.project.preprocessed_text_column = None
+                self.project._pre_docs = None
+                self.project._docs = None
+                self.project._corpus = None
+                self.project._id_row_indices = None
+                self.project.mark_dirty()
+
+                self.spacy_status.setText("Not preprocessed")
+                self.spacy_status.setObjectName("label_muted")
+                self.spacy_status.style().unpolish(self.spacy_status)
+                self.spacy_status.style().polish(self.spacy_status)
+                self._update_ready_indicator()
+
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load file: {e}")
 
     def _validate_dataset(self):
         """Validate the loaded dataset."""
-        if self._df is None:
+        if self._df is None or self.project is None:
             return
 
         text_col = self.text_col_combo.currentText()
@@ -1103,9 +589,15 @@ class Stage1Widget(QWidget):
         if id_col == "(none)":
             id_col = None
 
-        errors, warnings, id_stats = Validator.validate_dataset_text(
-            self._df, text_col, id_col
-        )
+        # Store columns on project so validate_text() can read them
+        if self.project:
+            self.project.csv_path = Path(self.file_path_edit.text())
+            self.project.csv_encoding = self.encoding_combo.currentData()
+            self.project.text_column = text_col
+            self.project.id_column = id_col
+            self.project._df = self._df
+
+        errors, warnings, id_stats = self.project.validate_text()
 
         if errors:
             self.dataset_status.setText("Validation errors found")
@@ -1143,34 +635,11 @@ class Stage1Widget(QWidget):
 
         # Store validated columns
         if self.project:
-            self.project.dataset_config.csv_path = Path(self.file_path_edit.text())
-            self.project.dataset_config.csv_encoding = self.encoding_combo.currentData()
-            self.project.dataset_config.text_column = text_col
-            self.project.dataset_config.id_column = id_col
-            self.project.dataset_config.n_rows = len(self._df)
-            self.project.dataset_config.n_valid = len(self._df)
-            self.project.dataset_config.cached = True
+            self.project.n_rows = len(self._df)
+            self.project.n_valid = len(self._df)
+            self.project.mark_dirty()
 
-            # Cache dataframe
-            self.project._cached_df = self._df
-
-    def _browse_embeddings(self):
-        """Open file dialog to select embeddings file."""
-        current = self.emb_path_combo.currentText()
-        start_dir = ""
-        if current and current != "(no recent models)":
-            parent = Path(current).parent
-            if parent.exists():
-                start_dir = str(parent)
-
-        filepath, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Embeddings File",
-            start_dir,
-            "Embedding Files (*.kv *.bin *.txt *.gz *.vec);;All Files (*)",
-        )
-        if filepath:
-            self._add_recent_embedding_path(filepath)
+        self._update_ready_indicator()
 
     def _preprocess_texts(self):
         """Run spaCy preprocessing on the texts.
@@ -1205,17 +674,48 @@ class Stage1Widget(QWidget):
                 row_texts = grp[text_col].fillna("").astype(str).tolist()
                 texts_raw.append(row_texts)
                 id_row_indices.append(grp.index.tolist())
-            self.project._cached_id_row_indices = id_row_indices
+            self.project._id_row_indices = id_row_indices
         else:
             texts_raw = self._df[text_col].fillna("").astype(str).tolist()
-            self.project._cached_id_row_indices = None
+            self.project._id_row_indices = None
 
-        model_name = self.model_combo.currentText()
+        # Resolve model name from input mode
+        if self.radio_language.isChecked():
+            lang = self.language_combo.currentData()
+            try:
+                from ssdiff.lang_config import lang_to_model
+                model_name = lang_to_model(lang)
+            except (ImportError, KeyError):
+                model_name = f"{lang}_core_news_lg"
+        else:
+            model_name = self.custom_model_input.text().strip()
+            if not model_name:
+                QMessageBox.warning(self, "No Model", "Enter a spaCy model name or path.")
+                return
+
+        # Resolve stopwords from stopword mode
+        stop_idx = self.stopword_combo.currentIndex()
+        if stop_idx == 0:  # Default
+            stopwords_override = None  # worker calls load_stopwords(language)
+        elif stop_idx == 1:  # Do not remove
+            stopwords_override = []
+        else:  # Custom file
+            if not self._custom_stopwords:
+                QMessageBox.warning(self, "No Stopwords", "Load a custom stopwords file first.")
+                return
+            stopwords_override = list(self._custom_stopwords)
 
         # Check if the spaCy model is available (pip-installed or locally downloaded)
         import spacy.util
         local_path = find_local_model(model_name)
-        if not spacy.util.is_package(model_name) and not local_path:
+        # If custom model looks like a path, try loading from that path directly
+        is_path = not self.radio_language.isChecked() and ("/" in model_name or "\\" in model_name)
+        if is_path:
+            local_path = Path(model_name) if Path(model_name).exists() else None
+            if local_path is None:
+                QMessageBox.warning(self, "Model Not Found", f"Path does not exist: {model_name}")
+                return
+        elif not spacy.util.is_package(model_name) and not local_path:
             reply = QMessageBox.question(
                 self,
                 "spaCy Model Not Found",
@@ -1228,10 +728,12 @@ class Stage1Widget(QWidget):
                 return
             # Store texts_raw for use after download completes
             self._pending_preprocess_texts = texts_raw
+            self._pending_stopwords_override = stopwords_override
             self._download_spacy_model(model_name)
             return
 
-        self._run_preprocess_worker(texts_raw, model_name, model_path=local_path)
+        self._run_preprocess_worker(texts_raw, model_name, model_path=local_path,
+                                    stopwords_override=stopwords_override)
 
     def _download_spacy_model(self, model_name: str):
         """Download a spaCy model in a background thread."""
@@ -1250,32 +752,47 @@ class Stage1Widget(QWidget):
     def _on_spacy_download_finished(self, model_path_str: str):
         """After model download, proceed with preprocessing using the same dialog."""
         texts_raw = self._pending_preprocess_texts
+        stopwords_override = getattr(self, "_pending_stopwords_override", None)
         self._pending_preprocess_texts = None
+        self._pending_stopwords_override = None
         if texts_raw is None:
             self._progress_dialog.accept()
             return
-        model_name = self.model_combo.currentText()
+        # Resolve model name from current UI state
+        if self.radio_language.isChecked():
+            lang = self.language_combo.currentData()
+            try:
+                from ssdiff.lang_config import lang_to_model
+                model_name = lang_to_model(lang)
+            except (ImportError, KeyError):
+                model_name = f"{lang}_core_news_lg"
+        else:
+            model_name = self.custom_model_input.text().strip()
         model_path = Path(model_path_str) if model_path_str else None
         # Reuse the download dialog for preprocessing (no accept/new dialog)
         self._progress_dialog.setWindowTitle("Preprocessing Texts")
-        self._run_preprocess_worker(texts_raw, model_name, model_path=model_path, reuse_dialog=True)
+        self._run_preprocess_worker(texts_raw, model_name, model_path=model_path,
+                                    stopwords_override=stopwords_override, reuse_dialog=True)
 
     def _on_spacy_download_error(self, error_message: str):
         """Handle spaCy model download failure."""
         self._pending_preprocess_texts = None
+        self._pending_stopwords_override = None
         self._progress_dialog.set_error(error_message)
 
     def _run_preprocess_worker(
         self, texts_raw, model_name: str,
         model_path: Optional[Path] = None,
+        stopwords_override=None,
         reuse_dialog: bool = False,
     ):
         """Start the preprocessing worker thread."""
         self._worker = PreprocessWorker(
             texts_raw=texts_raw,
-            language=self.language_combo.currentText(),
+            language=self.language_combo.currentData(),
             model=model_name,
             model_path=model_path,
+            stopwords_override=stopwords_override,
         )
 
         if not reuse_dialog:
@@ -1300,21 +817,28 @@ class Stage1Widget(QWidget):
             return
         self._progress_dialog.accept()
 
-        self.project._cached_pre_docs = pre_docs
-        self.project._cached_docs = docs
+        self.project._pre_docs = pre_docs
+        self.project._docs = docs
 
         # Update project config
-        self.project.spacy_config.language = self.language_combo.currentText()
-        self.project.spacy_config.model = self.model_combo.currentText()
-        self.project.spacy_config.lemmatize = self.lemmatize_check.isChecked()
-        self.project.spacy_config.remove_stopwords = self.remove_stopwords_check.isChecked()
-        self.project.spacy_config.processed = True
-        self.project.spacy_config.n_docs_processed = stats["n_docs"]
-        self.project.spacy_config.total_tokens = stats["total_tokens"]
-        self.project.spacy_config.mean_words_before_stopwords = stats["mean_words_before_stopwords"]
+        self.project.language = self.language_combo.currentData()
+        self.project.input_mode = "language" if self.radio_language.isChecked() else "custom"
+        self.project.spacy_model = self.custom_model_input.text().strip() if not self.radio_language.isChecked() else ""
+        stop_idx = self.stopword_combo.currentIndex()
+        self.project.stopword_mode = ["default", "none", "custom"][stop_idx]
+        self.project.custom_stopwords = list(self._custom_stopwords) if stop_idx == 2 else []
+        self.project.preprocessed_text_column = self.text_col_combo.currentText()
+        self.project.n_docs_processed = stats["n_docs"]
+        self.project.total_tokens = stats["total_tokens"]
+        self.project.mean_words_before_stopwords = stats["mean_words_before_stopwords"]
 
-        id_row_indices = self.project._cached_id_row_indices
-        ProjectIO.save_preprocessed_docs(self.project, pre_docs, docs, id_row_indices)
+        # Build and save a library Corpus object (Phase 6: corpus.pkl)
+        from ssdiff.corpus import Corpus
+        lang = self.project.language
+        corpus = Corpus(docs, pretokenized=True, lang=lang)
+        self.project._corpus = corpus
+        ProjectIO.save_corpus(self.project, corpus, pre_docs=pre_docs)
+
         ProjectIO.save_project(self.project)
 
         if stats.get("is_grouped"):
@@ -1335,6 +859,7 @@ class Stage1Widget(QWidget):
         self.spacy_status.style().unpolish(self.spacy_status)
         self.spacy_status.style().polish(self.spacy_status)
 
+        self.project.mark_dirty()
         self._update_ready_indicator()
 
     def _on_preprocess_error(self, error_message):
@@ -1347,148 +872,311 @@ class Stage1Widget(QWidget):
         self.spacy_status.style().unpolish(self.spacy_status)
         self.spacy_status.style().polish(self.spacy_status)
 
-    @staticmethod
-    def _kv_target_path(emb_path: str) -> Optional[Path]:
-        """Return the .kv path for a text-format embedding, or None."""
-        lower = emb_path.lower()
-        is_text = (
-            lower.endswith(".txt")
-            or lower.endswith(".vec")
-            or lower.endswith(".txt.gz")
-            or lower.endswith(".vec.gz")
-        )
-        if not is_text:
-            return None
-        p = Path(emb_path)
-        if p.suffix.lower() == ".gz":
-            return p.with_suffix("").with_suffix(".kv")
-        return p.with_suffix(".kv")
-
-    def _load_embeddings(self, reuse_dialog: bool = False):
-        """Load word embeddings.
-
-        If *reuse_dialog* is True, the caller has already created and shown
-        ``self._progress_dialog`` so we skip creating a new one.
-        """
-        if self.project is None:
+    def _on_text_column_changed(self, new_col: str):
+        """Invalidate dataset validation and preprocessing when text column changes."""
+        if self.project is None or not new_col:
             return
 
-        emb_path = self.emb_path_combo.currentText()
-        if not emb_path:
-            return
+        p = self.project
+        changed = False
 
-        # Ask about .kv conversion FIRST, before any slow work
-        self._pending_kv_path = None
-        kv_target = self._kv_target_path(emb_path)
-        if kv_target is not None and not kv_target.exists():
-            reply = QMessageBox.question(
-                self,
-                "Convert to .kv Format",
-                "Would you like to save these embeddings in .kv format?\n\n"
-                "This will take some extra time now, but will significantly "
-                "speed up loading in future sessions.",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if reply == QMessageBox.Yes:
-                self._pending_kv_path = str(kv_target)
+        # Invalidate dataset validation if validated for a different column
+        if p.text_ready and p.text_column and new_col != p.text_column:
+            p.n_valid = 0
+            self.dataset_status.setText("Text column changed — re-validate dataset")
+            self.dataset_status.setObjectName("label_muted")
+            self.dataset_status.style().unpolish(self.dataset_status)
+            self.dataset_status.style().polish(self.dataset_status)
+            changed = True
 
-        errors, warnings = Validator.validate_embeddings_path(emb_path)
-        if errors:
-            QMessageBox.critical(self, "Error", "\n".join(errors))
-            return
+        # Invalidate preprocessing if done for a different column
+        if p.preprocessing_ready and p.preprocessed_text_column and new_col != p.preprocessed_text_column:
+            p.preprocessed_text_column = None
+            p._pre_docs = None
+            p._docs = None
+            p._corpus = None
+            p._id_row_indices = None
+            self.spacy_status.setText("Preprocessed texts discarded (column changed)")
+            self.spacy_status.setObjectName("label_muted")
+            self.spacy_status.style().unpolish(self.spacy_status)
+            self.spacy_status.style().polish(self.spacy_status)
+            changed = True
 
-        self._worker = EmbeddingWorker(
-            embedding_path=Path(emb_path),
-            l2_normalize=self.l2_norm_check.isChecked(),
-            abtt_enabled=self.abtt_check.isChecked(),
-            abtt_m=self.abtt_m_spin.value(),
-            docs=self.project._cached_docs,
-        )
-
-        if not reuse_dialog:
-            title = "Loading & Converting Embeddings" if self._pending_kv_path else "Loading Embeddings"
-            self._progress_dialog = ProgressDialog(title, self)
-
-        self._worker.progress.connect(self._progress_dialog.update_progress)
-        self._worker.finished.connect(self._on_embeddings_loaded)
-        self._worker.error.connect(self._on_embeddings_error)
-
-        self._progress_dialog.cancel_button.clicked.connect(self._worker.cancel)
-
-        if not reuse_dialog:
-            self._progress_dialog.show()
-            QApplication.processEvents()
-        self._worker.start()
-        self._progress_dialog.exec()
-
-    def _on_embeddings_loaded(self, kv, stats):
-        """Handle embeddings loaded."""
-        if self._progress_dialog.is_cancelled():
-            return
-
-        self.project._cached_kv = kv
-
-        self.project.embedding_config.model_path = Path(self.emb_path_combo.currentText())
-        self._add_recent_embedding_path(self.emb_path_combo.currentText())
-        self.project.embedding_config.l2_normalize = self.l2_norm_check.isChecked()
-        self.project.embedding_config.abtt_enabled = self.abtt_check.isChecked()
-        self.project.embedding_config.abtt_m = self.abtt_m_spin.value()
-        self.project.embedding_config.loaded = True
-        self.project.embedding_config.vocab_size = stats["vocab_size"]
-        self.project.embedding_config.embedding_dim = stats["embedding_dim"]
-
-        if "coverage_pct" in stats:
-            self.project.embedding_config.coverage_pct = stats["coverage_pct"]
-            self.project.embedding_config.n_oov = stats.get("oov", 0)
-
-        status_text = (
-            f"Loaded {stats['vocab_size']:,} words, "
-            f"{stats['embedding_dim']}d vectors"
-        )
-        if "coverage_pct" in stats:
-            status_text += f", {stats['coverage_pct']:.1f}% coverage"
-
-        self.emb_status.setText(status_text)
-        self.emb_status.setObjectName("label_status_ok")
-        self.emb_status.style().unpolish(self.emb_status)
-        self.emb_status.style().polish(self.emb_status)
-
+        if changed:
+            self.project.mark_dirty()
         self._update_ready_indicator()
 
-        # Chain .kv conversion if the user opted in before loading
-        if self._pending_kv_path:
-            self._kv_convert_worker = KvConvertWorker(kv, self._pending_kv_path)
-            self._kv_convert_worker.progress.connect(self._progress_dialog.update_progress)
-            self._kv_convert_worker.finished.connect(self._on_kv_convert_finished)
-            self._kv_convert_worker.error.connect(self._on_kv_convert_error)
-            self._kv_convert_worker.start()
-        else:
-            self._progress_dialog.accept()
+    # --- Embedding prepare / select methods ---
 
-    def _on_kv_convert_finished(self, kv_path_str: str):
-        """Handle successful .kv conversion."""
-        self._progress_dialog.accept()
-        self._pending_kv_path = None
+    def _browse_embeddings_source(self):
+        """Browse for a source embedding file."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Embeddings File",
+            str(self._settings.value("last_emb_dir", "")),
+            "Embeddings (*.ssdembed *.bin *.txt *.kv *.vec *.gz);;All Files (*)",
+        )
+        if path:
+            self.emb_source_path.setText(path)
+            self._settings.setValue("last_emb_dir", str(Path(path).parent))
+            self.prepare_btn.setEnabled(True)
+            # If source is .ssdembed, read flags to constrain L2/ABTT
+            if path.endswith(".ssdembed"):
+                self._apply_ssdembed_constraints(Path(path))
+            else:
+                self.l2_check.setEnabled(True)
+                self.abtt_spin.setMinimum(0)
 
-        # Update combo box and recent paths to the new .kv file
-        self._add_recent_embedding_path(kv_path_str)
-        self.project.embedding_config.model_path = Path(kv_path_str)
+    def _apply_ssdembed_constraints(self, path: Path):
+        """Apply irreversibility constraints for .ssdembed source files.
 
-    def _on_kv_convert_error(self, error_message: str):
-        """Handle .kv conversion error."""
-        self._pending_kv_path = None
-        self._progress_dialog.set_error(error_message)
+        Reads metadata from the pickle file WITHOUT loading the heavy
+        .vectors.npy sidecar.
+        """
+        try:
+            import pickle
+            with open(path, "rb") as f:
+                obj = pickle.load(f)
+            is_l2 = getattr(obj, "l2_normalized", False)
+            cur_abtt = getattr(obj, "abtt_m", 0)
+            del obj
+            if is_l2:
+                self.l2_check.setChecked(True)
+                self.l2_check.setEnabled(False)
+            else:
+                self.l2_check.setEnabled(True)
+            if cur_abtt > 0:
+                self.abtt_spin.setMinimum(cur_abtt)
+                self.abtt_spin.setValue(cur_abtt)
+            else:
+                self.abtt_spin.setMinimum(0)
+        except Exception:
+            self.l2_check.setEnabled(True)
+            self.abtt_spin.setMinimum(0)
 
-    def _on_embeddings_error(self, error_message):
-        """Handle embeddings loading error."""
-        if self._progress_dialog.is_cancelled():
+    def _prepare_embedding(self):
+        """Start the embedding preparation worker."""
+        source = self.emb_source_path.text()
+        if not source or not Path(source).exists():
+            QMessageBox.warning(self, "Error", "Please select a valid source file.")
             return
-        self._progress_dialog.set_error(error_message)
-        self.emb_status.setText("Failed to load embeddings")
-        self.emb_status.setObjectName("label_status_error")
-        self.emb_status.style().unpolish(self.emb_status)
-        self.emb_status.style().polish(self.emb_status)
+        if not self.project:
+            return
+        output_dir = self.project.project_path / "embeddings"
+        l2 = self.l2_check.isChecked()
+        abtt = self.abtt_spin.value()
+        self.prepare_btn.setEnabled(False)
+        self.prepare_status.setText("Preparing...")
+        self._prepare_worker = EmbeddingPrepareWorker(
+            source_path=Path(source),
+            output_dir=output_dir,
+            l2_normalize=l2,
+            abtt_m=abtt,
+            parent=self,
+        )
+
+        self._progress_dialog = ProgressDialog("Preparing Embeddings", self)
+        self._prepare_worker.progress.connect(self._progress_dialog.update_progress)
+        self._prepare_worker.progress.connect(
+            lambda pct, msg: self.prepare_status.setText(msg)
+        )
+        self._prepare_worker.finished.connect(self._on_embedding_prepared)
+        self._prepare_worker.error.connect(self._on_embedding_prepare_error)
+        self._progress_dialog.cancel_button.clicked.connect(self._prepare_worker.cancel)
+
+        self._progress_dialog.show()
+        QApplication.processEvents()
+        self._prepare_worker.start()
+        self._progress_dialog.exec()
+
+    def _on_embedding_prepared(self, saved_path: str, meta: dict):
+        """Handle embedding preparation completion."""
+        if hasattr(self, "_progress_dialog") and self._progress_dialog:
+            self._progress_dialog.accept()
+        self.prepare_btn.setEnabled(True)
+        new_hash = ProjectIO.compute_embedding_hash(Path(saved_path))
+        existing = ProjectIO.find_duplicate_embedding(self.project, new_hash)
+        saved_name = Path(saved_path).name
+        if existing and existing != saved_name:
+            Path(saved_path).unlink(missing_ok=True)
+            sidecar = Path(saved_path + ".vectors.npy")
+            if sidecar.exists():
+                sidecar.unlink()
+            QMessageBox.information(
+                self, "Already Prepared",
+                f"This embedding is identical to: {existing}\n"
+                f"The duplicate was not saved.",
+            )
+            self.prepare_status.setText(f"Already prepared: {existing}")
+        else:
+            self.prepare_status.setText(
+                f"Saved: {saved_name} "
+                f"({meta['vocab_size']:,} words, {meta['embedding_dim']}d)"
+            )
+        self._refresh_embeddings_table()
+        # Auto-select if none selected yet
+        if not self.project.selected_embedding:
+            target = existing or saved_name
+            for row in range(self.emb_table.rowCount()):
+                if self.emb_table.item(row, 0) and self.emb_table.item(row, 0).text() == target:
+                    self.emb_table.selectRow(row)
+                    self._select_embedding()
+                    break
+
+    def _on_embedding_prepare_error(self, error_msg: str):
+        if hasattr(self, "_progress_dialog") and self._progress_dialog:
+            self._progress_dialog.accept()
+        self.prepare_btn.setEnabled(True)
+        self.prepare_status.setText("Preparation failed")
+        QMessageBox.critical(self, "Error", error_msg)
+
+    def _refresh_embeddings_table(self):
+        """Refresh the prepared embeddings table from project's embeddings/ dir."""
+        if not self.project:
+            return
+        embeddings = ProjectIO.list_prepared_embeddings(self.project)
+        self.emb_table.setRowCount(len(embeddings))
+        selected = self.project.selected_embedding
+        for i, meta in enumerate(embeddings):
+            self.emb_table.setItem(i, 0, QTableWidgetItem(meta["filename"]))
+            self.emb_table.setItem(i, 1, QTableWidgetItem(f"{meta['vocab_size']:,}"))
+            self.emb_table.setItem(i, 2, QTableWidgetItem(str(meta["embedding_dim"])))
+            self.emb_table.setItem(i, 3, QTableWidgetItem("Yes" if meta["l2_normalized"] else "No"))
+            self.emb_table.setItem(i, 4, QTableWidgetItem(str(meta["abtt_m"])))
+            self.emb_table.setItem(i, 5, QTableWidgetItem(f"{meta['file_size_mb']:.1f}"))
+            if meta["filename"] == selected:
+                self.emb_table.selectRow(i)
+        # Enable/disable buttons
+        has_rows = self.emb_table.rowCount() > 0
+        self.select_emb_btn.setEnabled(has_rows)
+        self.delete_emb_btn.setEnabled(has_rows)
+
+    def _select_embedding(self):
+        """Load the selected embedding into RAM."""
+        if not self.project:
+            return
+        rows = self.emb_table.selectionModel().selectedRows()
+        if rows:
+            row = rows[0].row()
+            filename = self.emb_table.item(row, 0).text()
+        elif self.project.selected_embedding:
+            # Fallback: no table selection but config has a file — find it
+            target = self.project.selected_embedding
+            filename = None
+            for i in range(self.emb_table.rowCount()):
+                item = self.emb_table.item(i, 0)
+                if item and item.text() == target:
+                    self.emb_table.selectRow(i)
+                    filename = target
+                    break
+            if not filename:
+                return
+        else:
+            return
+        emb_path = self.project.project_path / "embeddings" / filename
+        if not emb_path.exists():
+            QMessageBox.warning(self, "Error", f"File not found: {filename}")
+            return
+        # Unload current embedding and detach from results
+        self.project._emb = None
+        self.project._kv = None
+        for r in self.project.results:
+            if r._result is not None and hasattr(r._result, "embeddings"):
+                r._result.embeddings = None
+        self.emb_status.setText(f"Loading {filename}...")
+        self.select_emb_btn.setEnabled(False)
+        self._load_worker = EmbeddingLoadWorker(
+            ssdembed_path=emb_path,
+            docs=self.project._docs,
+            parent=self,
+        )
+
+        # Show progress dialog for manual Select (autoload has its own)
+        is_autoload = getattr(self, "_autoloading_embedding", False)
+        if not is_autoload:
+            self._progress_dialog = ProgressDialog("Loading Embeddings", self)
+            self._load_worker.progress.connect(self._progress_dialog.update_progress)
+            self._progress_dialog.cancel_button.clicked.connect(self._load_worker.cancel)
+
+        self._load_worker.progress.connect(
+            lambda pct, msg: self.emb_status.setText(msg)
+        )
+        self._load_worker.finished.connect(
+            lambda emb, stats: self._on_embedding_loaded(emb, stats, filename)
+        )
+        self._load_worker.error.connect(
+            lambda err: self._on_embedding_load_error(err)
+        )
+
+        if not is_autoload:
+            self._progress_dialog.show()
+            QApplication.processEvents()
+        self._load_worker.start()
+        if not is_autoload:
+            self._progress_dialog.exec()
+
+    def _on_embedding_load_error(self, err: str):
+        """Handle embedding load failure."""
+        if hasattr(self, "_progress_dialog") and self._progress_dialog:
+            self._progress_dialog.accept()
+        self.emb_status.setText("Load failed")
+        self.select_emb_btn.setEnabled(True)
+        QMessageBox.critical(self, "Error", err)
+        if getattr(self, "_autoloading_embedding", False):
+            self._autoloading_embedding = False
+
+    def _on_embedding_loaded(self, emb, stats: dict, filename: str):
+        """Handle embedding load completion."""
+        if hasattr(self, "_progress_dialog") and self._progress_dialog:
+            self._progress_dialog.accept()
+        self.project._emb = emb
+        self.project._kv = emb
+        p = self.project
+        p.selected_embedding = filename
+        p.vocab_size = stats.get("vocab_size", 0)
+        p.embedding_dim = stats.get("embedding_dim", 0)
+        p.l2_normalized = stats.get("l2_normalized", False)
+        p.abtt_m = stats.get("abtt_m", 0)
+        p.emb_coverage_pct = stats.get("coverage_pct", 0.0)
+        p.emb_n_oov = stats.get("n_oov", 0)
+        cov = f", coverage: {p.emb_coverage_pct:.1f}%" if p.emb_coverage_pct > 0 else ""
+        self.emb_status.setText(
+            f"Selected: {filename} ({p.vocab_size:,} words, {p.embedding_dim}d{cov})"
+        )
+        self.select_emb_btn.setEnabled(True)
+        self.project.mark_dirty()
+        self._update_ready_indicator()
+
+        if getattr(self, "_autoloading_embedding", False):
+            self._autoloading_embedding = False
+
+    def _delete_embedding(self):
+        """Delete a prepared embedding from the project."""
+        rows = self.emb_table.selectionModel().selectedRows()
+        if not rows or not self.project:
+            return
+        row = rows[0].row()
+        filename = self.emb_table.item(row, 0).text()
+        reply = QMessageBox.question(
+            self, "Delete Embedding",
+            f"Delete {filename} from this project?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        emb_path = self.project.project_path / "embeddings" / filename
+        sidecar = Path(str(emb_path) + ".vectors.npy")
+        import subprocess
+        subprocess.run(["trash-put", str(emb_path)], check=False)
+        if sidecar.exists():
+            subprocess.run(["trash-put", str(sidecar)], check=False)
+        if self.project.selected_embedding == filename:
+            self.project.selected_embedding = None
+            self.project._emb = None
+            self.project._kv = None
+            self.emb_status.setText("")
+            self._update_ready_indicator()
+        self._refresh_embeddings_table()
 
     def _update_ready_indicator(self):
         """Update the ready indicator based on current state."""
@@ -1504,40 +1192,43 @@ class Stage1Widget(QWidget):
 
         checks = []
 
-        if self.project.dataset_config.cached:
-            checks.append(("Dataset", True, f"{self.project.dataset_config.n_valid:,} valid samples"))
+        # 1. Dataset loaded (CSV in memory)
+        if self.project._df is not None and len(self.project._df) > 0:
+            n_rows = len(self.project._df)
+            n_cols = len(self.project._df.columns)
+            checks.append(("Dataset", True, f"{n_rows:,} rows, {n_cols} columns"))
         else:
             checks.append(("Dataset", False, "Not loaded"))
 
-        if self.project.spacy_config.processed:
-            checks.append(("Text Processing", True, f"{self.project.spacy_config.n_docs_processed:,} docs processed"))
+        # 2. Text column validated
+        if self.project.text_ready and self.project.n_valid > 0:
+            checks.append(("Text Column", True, f"{self.project.n_valid:,} valid samples"))
+        else:
+            checks.append(("Text Column", False, "Not validated"))
+
+        # 3. Text preprocessing
+        preprocessed = self.project.preprocessing_ready
+        if preprocessed:
+            n_docs = self.project.n_docs_processed or len(self.project._docs or [])
+            pp_col = self.project.preprocessed_text_column
+            if pp_col:
+                detail = f"{n_docs:,} docs (column: '{pp_col}')"
+                current_col = self.text_col_combo.currentText()
+                if current_col and current_col != pp_col:
+                    detail += " [!] re-preprocess needed"
+            else:
+                detail = f"{n_docs:,} docs processed"
+            checks.append(("Text Processing", True, detail))
         else:
             checks.append(("Text Processing", False, "Not preprocessed"))
 
-        if self.project._cached_kv is not None:
-            checks.append(("Embeddings", True, f"{self.project.embedding_config.vocab_size:,} words"))
-        elif self.project.embedding_config.loaded:
-            checks.append(("Embeddings", False, "Not in memory — click Load Embeddings"))
+        # 4. Embeddings
+        if self.project._kv is not None:
+            checks.append(("Embeddings", True, f"{self.project.vocab_size:,} words"))
+        elif self.project.selected_embedding:
+            checks.append(("Embeddings", False, "Not in memory — click Select"))
         else:
             checks.append(("Embeddings", False, "Not loaded"))
-
-        # Analysis config check
-        if hasattr(self, 'continuous_radio'):
-            if self.continuous_radio.isChecked():
-                col = self.outcome_col_combo.currentText()
-                if self.project._cached_y is not None and col and col != "(none)":
-                    checks.append(("Analysis", True, f"Continuous - {col}"))
-                else:
-                    checks.append(("Analysis", False, "No outcome column selected"))
-            else:
-                col = self.group_col_combo.currentText()
-                if (self.project._cached_groups is not None
-                        and len(self.project._cached_groups) > 0
-                        and len(np.unique(self.project._cached_groups)) >= 2
-                        and col and col != "(none)"):
-                    checks.append(("Analysis", True, f"Crossgroup - {col}"))
-                else:
-                    checks.append(("Analysis", False, "No group column selected"))
 
         all_ready = all(ok for _, ok, _ in checks)
 
@@ -1546,7 +1237,6 @@ class Stage1Widget(QWidget):
             self.ready_title.setText("Setup Complete")
             if self.next_btn:
                 self.next_btn.setEnabled(True)
-            self.project.update_ready_state()
         else:
             self.ready_frame.setObjectName("frame_ready_pending")
             self.ready_title.setText("Setup Incomplete")
@@ -1570,6 +1260,69 @@ class Stage1Widget(QWidget):
 
     # --- Public methods ---
 
+    def reset(self):
+        """Clear all state for project close."""
+        self.project = None
+        self._df = None
+        self._update_ready_indicator()
+
+    def _validate_project_on_load(self):
+        """Check for inconsistencies after loading a project and fix them."""
+        project = self.project
+        if not project:
+            return
+        warnings = []
+
+        # 1. CSV file missing
+        csv_path = project.csv_path
+        if csv_path and not Path(csv_path).exists():
+            warnings.append(f"CSV file not found: {csv_path}")
+
+        # 2. Text column missing from loaded DataFrame
+        text_col = project.text_column
+        if text_col and self._df is not None and text_col not in self._df.columns:
+            warnings.append(f"Text column '{text_col}' not found in CSV columns")
+
+        # 2b. Text column exists but is all-empty
+        if (text_col and self._df is not None
+                and text_col in self._df.columns
+                and project.text_ready
+                and self._df[text_col].dropna().astype(str).str.strip().eq('').all()):
+            warnings.append(f"Text column '{text_col}' contains no non-empty values")
+
+        # 3. Preprocessed docs missing from disk
+        if project.preprocessing_ready:
+            if not ProjectIO.corpus_exists(project):
+                project.preprocessed_text_column = None
+                warnings.append("Preprocessed documents not found on disk")
+
+        # 4. Embedding file missing
+        if project.selected_embedding:
+            emb_path = project.project_path / "embeddings" / project.selected_embedding
+            if not emb_path.exists():
+                project.selected_embedding = None
+                warnings.append(f"Embedding file not found: {project.selected_embedding}")
+
+        # 5. Column mismatch — preprocessed with different text column
+        pp_col = project.preprocessed_text_column
+        ds_col = project.text_column
+        if (pp_col and ds_col and pp_col != ds_col
+                and project.preprocessing_ready):
+            project.preprocessed_text_column = None
+            project._pre_docs = None
+            project._docs = None
+            project._corpus = None
+            project._id_row_indices = None
+            warnings.append(
+                f"Text column changed ('{pp_col}' -> '{ds_col}'): "
+                f"preprocessed texts discarded"
+            )
+
+        if warnings:
+            QMessageBox.warning(
+                self, "Project Validation", "\n".join(warnings)
+            )
+
     def load_project(self, project: Project) -> bool:
         """Load a project into the UI.
 
@@ -1580,28 +1333,27 @@ class Stage1Widget(QWidget):
 
         # Show a progress dialog immediately so the user sees feedback
         # while synchronous loading (CSV, preprocessed docs) runs.
-        needs_embeddings = (
-            project.embedding_config.loaded
-            and project.embedding_config.model_path
-            and project.embedding_config.model_path.exists()
+        needs_embeddings = bool(
+            project.selected_embedding
+            and (project.project_path / "embeddings" / project.selected_embedding).exists()
         )
         self._progress_dialog = ProgressDialog("Loading Project", self)
         self._progress_dialog.update_progress(0, "Loading dataset...")
         self._progress_dialog.show()
         QApplication.processEvents()
 
-        if project.dataset_config.csv_path:
-            self.file_path_edit.setText(str(project.dataset_config.csv_path))
+        if project.csv_path:
+            self.file_path_edit.setText(str(project.csv_path))
 
             # Restore encoding selection
-            saved_enc = project.dataset_config.csv_encoding
+            saved_enc = project.csv_encoding
             for i in range(self.encoding_combo.count()):
                 if self.encoding_combo.itemData(i) == saved_enc:
                     self.encoding_combo.setCurrentIndex(i)
                     break
 
             try:
-                csv_path = project.dataset_config.csv_path
+                csv_path = project.csv_path
                 if csv_path.exists():
                     ext = csv_path.suffix.lower()
                     encoding = self.encoding_combo.currentData()
@@ -1611,22 +1363,23 @@ class Stage1Widget(QWidget):
                         self._df = pd.read_csv(csv_path, sep="\t", encoding=encoding)
                     else:
                         self._df = pd.read_csv(csv_path, encoding=encoding)
-                    project._cached_df = self._df
+                    project._df = self._df
 
                     columns = self._df.columns.tolist()
+                    self.text_col_combo.blockSignals(True)
                     self.text_col_combo.clear()
                     self.text_col_combo.addItems(columns)
+                    if project.text_column:
+                        idx = self.text_col_combo.findText(project.text_column)
+                        if idx >= 0:
+                            self.text_col_combo.setCurrentIndex(idx)
+                    self.text_col_combo.blockSignals(False)
+
                     self.id_col_combo.clear()
                     self.id_col_combo.addItem("(none)")
                     self.id_col_combo.addItems(columns)
-
-                    if project.dataset_config.text_column:
-                        idx = self.text_col_combo.findText(project.dataset_config.text_column)
-                        if idx >= 0:
-                            self.text_col_combo.setCurrentIndex(idx)
-
-                    if project.dataset_config.id_column:
-                        idx = self.id_col_combo.findText(project.dataset_config.id_column)
+                    if project.id_column:
+                        idx = self.id_col_combo.findText(project.id_column)
                         if idx >= 0:
                             self.id_col_combo.setCurrentIndex(idx)
 
@@ -1640,21 +1393,28 @@ class Stage1Widget(QWidget):
         QApplication.processEvents()
 
         # Load spaCy config
-        lang_idx = self.language_combo.findText(project.spacy_config.language)
+        lang_idx = self.language_combo.findData(project.language)
         if lang_idx >= 0:
             self.language_combo.setCurrentIndex(lang_idx)
 
-        self._update_model_options(project.spacy_config.language)
-        model_idx = self.model_combo.findText(project.spacy_config.model)
-        if model_idx >= 0:
-            self.model_combo.setCurrentIndex(model_idx)
+        # Restore input mode
+        if project.input_mode == "custom":
+            self.radio_custom.setChecked(True)
+            self.custom_model_input.setText(project.spacy_model)
+        else:
+            self.radio_language.setChecked(True)
 
-        self.lemmatize_check.setChecked(project.spacy_config.lemmatize)
-        self.remove_stopwords_check.setChecked(project.spacy_config.remove_stopwords)
+        # Restore stopword mode
+        stop_map = {"default": 0, "none": 1, "custom": 2}
+        self.stopword_combo.setCurrentIndex(stop_map.get(project.stopword_mode, 0))
+        if project.stopword_mode == "custom":
+            self._custom_stopwords = list(project.custom_stopwords)
+            self.stopword_file_label.setText(f"{len(self._custom_stopwords)} words loaded")
 
-        if project.spacy_config.processed:
+        if (ProjectIO.corpus_exists(project)
+                and project.preprocessed_text_column == project.text_column):
             self.spacy_status.setText(
-                f"Preprocessed {project.spacy_config.n_docs_processed:,} documents"
+                f"Preprocessed {project.n_docs_processed:,} documents"
             )
             self.spacy_status.setObjectName("label_status_ok")
             self.spacy_status.style().unpolish(self.spacy_status)
@@ -1663,140 +1423,44 @@ class Stage1Widget(QWidget):
             self._progress_dialog.update_progress(35, "Loading preprocessed texts...")
             QApplication.processEvents()
 
-            cached = ProjectIO.load_preprocessed_docs(project)
-            if cached:
-                pre_docs, docs, id_row_indices = cached
-                project._cached_pre_docs = pre_docs
-                project._cached_docs = docs
-                project._cached_id_row_indices = id_row_indices
-
-                # Back-fill mean_words_before_stopwords for older projects
-                if not project.spacy_config.mean_words_before_stopwords and pre_docs:
-                    try:
-                        words_per_doc = [
-                            sum(len(s.split()) for s in pdoc.sents_surface)
-                            for pdoc in pre_docs
-                        ]
-                        project.spacy_config.mean_words_before_stopwords = (
-                            sum(words_per_doc) / len(words_per_doc)
-                        )
-                    except Exception:
-                        pass
+            corpus = ProjectIO.load_corpus(project)
+            if corpus is not None:
+                project._corpus = corpus
+                project._pre_docs = corpus.pre_docs
+                project._docs = corpus.docs
+                project._id_row_indices = None
 
         self._progress_dialog.update_progress(70, "Loading configuration...")
         QApplication.processEvents()
 
-        # Load embedding config
-        if project.embedding_config.model_path:
-            self._add_recent_embedding_path(str(project.embedding_config.model_path))
+        # Load embedding config — refresh table and restore status
+        self._refresh_embeddings_table()
+        self.l2_check.setChecked(project.l2_normalized)
+        self.abtt_spin.setValue(project.abtt_m)
 
-        self.l2_norm_check.setChecked(project.embedding_config.l2_normalize)
-        self.abtt_check.setChecked(project.embedding_config.abtt_enabled)
-        self.abtt_m_spin.setValue(project.embedding_config.abtt_m)
-
-        if project.embedding_config.loaded:
+        if project.selected_embedding:
             self.emb_status.setText(
-                f"Loaded {project.embedding_config.vocab_size:,} words, "
-                f"{project.embedding_config.embedding_dim}d"
+                f"Selected: {project.selected_embedding} "
+                f"({project.vocab_size:,} words, {project.embedding_dim}d)"
             )
-            self.emb_status.setObjectName("label_status_ok")
-            self.emb_status.style().unpolish(self.emb_status)
-            self.emb_status.style().polish(self.emb_status)
 
-        # Load hyperparameters
-        if project.hyperparameters.n_pca_mode == "manual":
-            self.pca_manual_radio.setChecked(True)
-            self.pca_k_spin.setValue(project.hyperparameters.n_pca_manual or 50)
-        else:
-            self.pca_auto_radio.setChecked(True)
-
-        self.sweep_k_min_spin.setValue(project.hyperparameters.sweep_k_min)
-        self.sweep_k_max_spin.setValue(project.hyperparameters.sweep_k_max)
-        self.sweep_k_step_spin.setValue(project.hyperparameters.sweep_k_step)
-        self.window_size_spin.setValue(project.hyperparameters.context_window_size)
-        self.sif_a_spin.setValue(project.hyperparameters.sif_a)
-        self.unit_beta_check.setChecked(project.hyperparameters.use_unit_beta)
-        self.l2_docs_check.setChecked(project.hyperparameters.l2_normalize_docs)
-        self.cluster_topn_spin.setValue(project.hyperparameters.clustering_topn)
-        self.cluster_k_auto_check.setChecked(project.hyperparameters.clustering_k_auto)
-        self.cluster_k_min_spin.setValue(project.hyperparameters.clustering_k_min)
-        self.cluster_k_max_spin.setValue(project.hyperparameters.clustering_k_max)
-        self.auck_radius_spin.setValue(project.hyperparameters.auck_radius)
-        self.beta_smooth_win_spin.setValue(project.hyperparameters.beta_smooth_win)
-        self.beta_smooth_kind_combo.setCurrentText(project.hyperparameters.beta_smooth_kind)
-        self.weight_by_size_check.setChecked(project.hyperparameters.weight_by_size)
-
-        # Load analysis configuration
-        if self._df is not None:
-            columns = self._df.columns.tolist()
-            numeric_cols = self._df.select_dtypes(include="number").columns.tolist()
-
-            self.outcome_col_combo.blockSignals(True)
-            self.outcome_col_combo.clear()
-            self.outcome_col_combo.addItem("(none)")
-            self.outcome_col_combo.addItems(numeric_cols)
-            self.outcome_col_combo.setCurrentIndex(0)
-            self.outcome_col_combo.blockSignals(False)
-
-            self.group_col_combo.blockSignals(True)
-            self.group_col_combo.clear()
-            self.group_col_combo.addItem("(none)")
-            self.group_col_combo.addItems(columns)
-            self.group_col_combo.setCurrentIndex(0)
-            self.group_col_combo.blockSignals(False)
-
-        # Restore analysis type
-        if project.dataset_config.analysis_type == "crossgroup":
-            self.crossgroup_radio.setChecked(True)
-            if project.dataset_config.group_column:
-                idx = self.group_col_combo.findText(project.dataset_config.group_column)
-                if idx >= 0:
-                    self.group_col_combo.setCurrentIndex(idx)
-            self.n_perm_spin.setValue(project.dataset_config.n_perm)
-        else:
-            self.continuous_radio.setChecked(True)
-            col = project.dataset_config.outcome_column
-            if col:
-                idx = self.outcome_col_combo.findText(col)
-                if idx >= 0:
-                    self.outcome_col_combo.setCurrentIndex(idx)
-
-        # Restore mode
-        if project.dataset_config.concept_mode == "fulldoc":
-            self.fulldoc_radio.setChecked(True)
-        else:
-            self.lexicon_radio.setChecked(True)
-
-        # Trigger column change to populate cached y/groups
-        if self.continuous_radio.isChecked():
-            self._on_outcome_column_changed()
-        else:
-            self._on_group_column_changed()
-
-        self._update_advanced_settings_visibility()
+        self._validate_project_on_load()
         self._update_ready_indicator()
 
-        # Auto-reload embeddings if they were previously loaded AND the
-        # user has opted in via Settings (default: off for faster opens).
-        from .settings_dialog import get_autoload_embeddings
-
-        if needs_embeddings and project._cached_kv is None and get_autoload_embeddings():
+        # Auto-load the previously selected embedding if available
+        if needs_embeddings and project._kv is None:
             self._progress_dialog.update_progress(50, "Loading embeddings...")
             QApplication.processEvents()
-            self._load_embeddings(reuse_dialog=True)
-            if (
-                hasattr(self, "_progress_dialog")
-                and self._progress_dialog is not None
-                and self._progress_dialog.is_cancelled()
-            ):
-                self.project = None
-                return False
+            self._autoloading_embedding = True
+            self._select_embedding()
         else:
-            # No embeddings to load — set progress to 100%.
-            # The caller (_load_project_into_ui) will close the dialog
-            # after all stage widgets have finished loading.
-            self._progress_dialog.update_progress(100, "Project loaded.")
-            QApplication.processEvents()
+            self._autoloading_embedding = False
+
+        self._progress_dialog.update_progress(100, "Project loaded.")
+        QApplication.processEvents()
+
+        if not self._autoloading_embedding:
+            self._progress_dialog.accept()
 
         return True
 
@@ -1805,48 +1469,19 @@ class Stage1Widget(QWidget):
         if not project:
             return
 
-        project.dataset_config.text_column = self.text_col_combo.currentText()
+        project.text_column = self.text_col_combo.currentText()
 
         id_col = self.id_col_combo.currentText()
-        project.dataset_config.id_column = id_col if id_col != "(none)" else None
+        project.id_column = id_col if id_col != "(none)" else None
 
-        project.spacy_config.language = self.language_combo.currentText()
-        project.spacy_config.model = self.model_combo.currentText()
-        project.spacy_config.lemmatize = self.lemmatize_check.isChecked()
-        project.spacy_config.remove_stopwords = self.remove_stopwords_check.isChecked()
+        project.language = self.language_combo.currentData()
+        project.input_mode = "language" if self.radio_language.isChecked() else "custom"
+        project.spacy_model = self.custom_model_input.text().strip() if not self.radio_language.isChecked() else ""
+        stop_idx = self.stopword_combo.currentIndex()
+        project.stopword_mode = ["default", "none", "custom"][stop_idx]
+        project.custom_stopwords = list(self._custom_stopwords) if stop_idx == 2 else []
 
-        if self.emb_path_combo.currentText() and self.emb_path_combo.currentText() != "(no recent models)":
-            project.embedding_config.model_path = Path(self.emb_path_combo.currentText())
-        project.embedding_config.l2_normalize = self.l2_norm_check.isChecked()
-        project.embedding_config.abtt_enabled = self.abtt_check.isChecked()
-        project.embedding_config.abtt_m = self.abtt_m_spin.value()
-
-        project.hyperparameters.n_pca_mode = "manual" if self.pca_manual_radio.isChecked() else "auto"
-        project.hyperparameters.n_pca_manual = self.pca_k_spin.value() if self.pca_manual_radio.isChecked() else None
-        project.hyperparameters.sweep_k_min = self.sweep_k_min_spin.value()
-        project.hyperparameters.sweep_k_max = self.sweep_k_max_spin.value()
-        project.hyperparameters.sweep_k_step = self.sweep_k_step_spin.value()
-        project.hyperparameters.context_window_size = self.window_size_spin.value()
-        project.hyperparameters.sif_a = self.sif_a_spin.value()
-        project.hyperparameters.use_unit_beta = self.unit_beta_check.isChecked()
-        project.hyperparameters.l2_normalize_docs = self.l2_docs_check.isChecked()
-        project.hyperparameters.clustering_topn = self.cluster_topn_spin.value()
-        project.hyperparameters.clustering_k_auto = self.cluster_k_auto_check.isChecked()
-        project.hyperparameters.clustering_k_min = self.cluster_k_min_spin.value()
-        project.hyperparameters.clustering_k_max = self.cluster_k_max_spin.value()
-        project.hyperparameters.clustering_top_words = self.cluster_topn_spin.value()
-        project.hyperparameters.auck_radius = self.auck_radius_spin.value()
-        project.hyperparameters.beta_smooth_win = self.beta_smooth_win_spin.value()
-        project.hyperparameters.beta_smooth_kind = self.beta_smooth_kind_combo.currentText()
-        project.hyperparameters.weight_by_size = self.weight_by_size_check.isChecked()
-
-        # Analysis configuration
-        project.dataset_config.analysis_type = "crossgroup" if self.crossgroup_radio.isChecked() else "continuous"
-        project.dataset_config.concept_mode = "fulldoc" if self.fulldoc_radio.isChecked() else "lexicon"
-        project.dataset_config.n_perm = self.n_perm_spin.value()
-        if self.continuous_radio.isChecked():
-            col = self.outcome_col_combo.currentText()
-            project.dataset_config.outcome_column = None if col == "(none)" else (col or None)
-        else:
-            col = self.group_col_combo.currentText()
-            project.dataset_config.group_column = None if col == "(none)" else (col or None)
+        # Embedding config is managed by the prepare/select workflow;
+        # only persist the ABTT/L2 defaults from the "Prepare" panel.
+        project.l2_normalized = self.l2_check.isChecked()
+        project.abtt_m = self.abtt_spin.value()

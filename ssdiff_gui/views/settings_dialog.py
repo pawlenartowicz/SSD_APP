@@ -9,22 +9,14 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QLineEdit,
-    QCheckBox,
     QGroupBox,
     QFileDialog,
 )
-from PySide6.QtCore import QSettings
+from ..utils.settings import app_settings
 
 
 # QSettings keys
 _KEY_PROJECTS_DIR = "projects_directory"
-_KEY_AUTOLOAD_EMBEDDINGS = "autoload_embeddings"
-
-
-def get_autoload_embeddings() -> bool:
-    """Return the persisted auto-load-embeddings preference (default False)."""
-    s = QSettings("SSD", "SSD")
-    return s.value(_KEY_AUTOLOAD_EMBEDDINGS, False, type=bool)
 
 
 class SettingsDialog(QDialog):
@@ -35,7 +27,7 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Settings")
         self.setMinimumWidth(520)
 
-        self._settings = QSettings("SSD", "SSD")
+        self._settings = app_settings()
         self._setup_ui()
 
     def _setup_ui(self):
@@ -71,30 +63,6 @@ class SettingsDialog(QDialog):
         dir_group.setLayout(dir_layout)
         layout.addWidget(dir_group)
 
-        # --- Project loading ---
-        load_group = QGroupBox("Project Loading")
-        load_layout = QVBoxLayout()
-
-        self._autoload_check = QCheckBox(
-            "Automatically load embeddings when opening a project"
-        )
-        self._autoload_check.setChecked(
-            self._settings.value(_KEY_AUTOLOAD_EMBEDDINGS, False, type=bool)
-        )
-        load_layout.addWidget(self._autoload_check)
-
-        load_hint = QLabel(
-            "When disabled, projects open faster and embeddings can be "
-            "loaded manually from Stage 1.  Enable this if you always want "
-            "to jump straight into analysis."
-        )
-        load_hint.setObjectName("label_muted")
-        load_hint.setWordWrap(True)
-        load_layout.addWidget(load_hint)
-
-        load_group.setLayout(load_layout)
-        layout.addWidget(load_group)
-
         layout.addStretch()
 
         # --- Buttons ---
@@ -122,7 +90,4 @@ class SettingsDialog(QDialog):
 
     def _save(self):
         self._settings.setValue(_KEY_PROJECTS_DIR, self._dir_edit.text())
-        self._settings.setValue(
-            _KEY_AUTOLOAD_EMBEDDINGS, self._autoload_check.isChecked()
-        )
         self.accept()

@@ -1,12 +1,10 @@
-"""SSD analysis runner thread."""
+"""SSD analysis runner thread — uses ssdiff v1.0.0 API."""
 
-import copy
-import os
+import json
+import math
 import sys
 import traceback
 from datetime import datetime
-from pathlib import Path
-from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
@@ -22,55 +20,44 @@ def _ensure_streams() -> None:
 
 
 def _debug_log(msg: str) -> None:
-    """Write a message to both stderr (Python run) and the SSD debug log file (frozen exe)."""
-    # Console — works in Python, silently fails in windowed exe
+    """Write a message to stderr (dev) and to a log file (frozen exe where stderr is /dev/null)."""
     try:
         print(msg, file=sys.stderr)
     except Exception:
         pass
-
-    # File — always works
     try:
-        if sys.platform == "win32":
-            local = os.environ.get("LOCALAPPDATA", "")
-            base = Path(local) / "SSD" if local else Path.home() / "AppData" / "Local" / "SSD"
-        elif sys.platform == "darwin":
-            base = Path.home() / "Library" / "Application Support" / "SSD"
-        else:
-            base = Path.home() / ".local" / "share" / "SSD"
-        base.mkdir(parents=True, exist_ok=True)
-        log_path = base / "debug.log"
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"[{ts}] {msg}\n")
+        from ..utils.paths import get_app_data_dir
+        log_dir = get_app_data_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / "debug.log", "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
     except Exception:
         pass
 
-from ..models.project import (
-    Project,
-    Run,
-    RunResults,
-    ConceptConfig,
-)
-from ..utils.file_io import ProjectIO
+
+from ..models.project import Project, Result, DEFAULT_RANDOM_SEED  # noqa: E402
+from ..utils.file_io import ProjectIO  # noqa: E402
+
+
+def _sanitize_for_json(v):
+    """Convert numpy types and NaN/Inf to JSON-safe values."""
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return None
+    if hasattr(v, "item"):  # numpy scalar
+        return v.item()
+    return v
 
 
 class SSDRunner(QThread):
     """Worker thread for running SSD analysis."""
 
     progress = Signal(int, str)  # percent, message
-    finished = Signal(object)  # Run object
+    finished = Signal(object)  # Result object
     error = Signal(str)
 
-    def __init__(
-        self,
-        project: Project,
-        concept_config: ConceptConfig,
-        parent=None,
-    ):
+    def __init__(self, project: Project, parent=None):
         super().__init__(parent)
         self.project = project
-        self.concept_config = concept_config
         self._is_cancelled = False
 
     def cancel(self):
@@ -80,463 +67,340 @@ class SSDRunner(QThread):
     def run(self):
         """Execute the SSD analysis pipeline."""
         try:
-            # Create run object
-            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_path = self.project.project_path / "runs" / run_id
+            # Create result object
+            result_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            result_path = self.project.project_path / "results" / result_id
 
-            run = Run(
-                run_id=run_id,
+            result = Result(
+                result_id=result_id,
                 timestamp=datetime.now(),
-                run_path=run_path,
-                concept_config=copy.deepcopy(self.concept_config),
-                frozen_dataset_config=copy.deepcopy(self.project.dataset_config),
-                frozen_spacy_config=copy.deepcopy(self.project.spacy_config),
-                frozen_embedding_config=copy.deepcopy(self.project.embedding_config),
-                frozen_hyperparameters=copy.deepcopy(self.project.hyperparameters),
+                result_path=result_path,
+                config_snapshot=self.project.snapshot_config(),
                 status="running",
             )
 
-            run_path.mkdir(parents=True, exist_ok=True)
-            ProjectIO.save_run_config(run)
+            result_path.mkdir(parents=True, exist_ok=True)
+            ProjectIO.save_result_config(result)
 
             if self._is_cancelled:
                 return
 
-            if self.concept_config.analysis_type == "crossgroup":
-                self._run_crossgroup(run)
+            atype = self.project.analysis_type
+            if atype == "pls":
+                self._run_pls(result)
+            elif atype == "pca_ols":
+                self._run_pca_ols(result)
+            elif atype == "groups":
+                self._run_groups(result)
             else:
-                self._run_continuous(run)
+                raise ValueError(f"Unknown analysis_type: {atype!r}")
 
         except Exception as e:
-            import traceback
             error_msg = f"{str(e)}\n\n{traceback.format_exc()}"
             self.error.emit(error_msg)
 
     # ------------------------------------------------------------------ #
-    #  Continuous pipeline (existing)
+    #  Helpers
     # ------------------------------------------------------------------ #
 
-    def _run_continuous(self, run: Run):
-        """Execute the continuous SSD analysis pipeline."""
-        _ensure_streams()
-        from ssdiff import SSD, pca_sweep
+    def _build_ssd(self):
+        """Construct the SSD object from cached project data."""
+        from ssdiff import SSD, Corpus
 
-        self.progress.emit(5, "Loading cached data...")
-        kv = self.project._cached_kv
-        docs = self.project._cached_docs
-        y = self.project._cached_y
-        pre_docs = self.project._cached_pre_docs
+        emb = self.project._emb
+        docs = self.project._docs
+        pre_docs = self.project._pre_docs
 
-        if kv is None or docs is None or y is None:
+        atype = self.project.analysis_type
+        if atype == "groups":
+            y = self.project._groups
+        else:
+            y = self.project._y
+
+        if emb is None or docs is None or y is None:
             raise ValueError("Cached data not available. Please complete Stage 1 setup.")
 
-        if self._is_cancelled:
-            return
+        p = self.project
 
-        # Prepare lexicon
-        lexicon = None
+        # Use cached Corpus if available, otherwise build from pre-tokenized docs
+        corpus = self.project._corpus
+        if corpus is None:
+            lang = self.project.language
+            corpus = Corpus(docs, pretokenized=True, lang=lang)
+
+        # Lexicon / full-doc mode
+        lexicon = set()
         use_full_doc = True
-        cov_summary = None
-        cov_per_token = None
-        if self.concept_config.mode == "lexicon":
-            lexicon = self.concept_config.lexicon_tokens
+        if self.project.concept_mode == "lexicon":
+            lexicon = set(self.project.lexicon_tokens) if self.project.lexicon_tokens else set()
             use_full_doc = False
             if not lexicon:
                 raise ValueError("Lexicon mode selected but no tokens provided.")
-
-            self.progress.emit(8, "Computing lexicon coverage...")
-            try:
-                from ssdiff import coverage_by_lexicon
-                cov_summary, cov_per_token_df = coverage_by_lexicon(
-                    (docs, y), lexicon=lexicon
-                )
-                cov_per_token = cov_per_token_df.to_dict("records")
-            except Exception as e:
-                _debug_log(f"[continuous] Lexicon coverage failed: {e}\n{traceback.format_exc()}")
-
-        if self._is_cancelled:
-            return
-
-        # PCA sweep if needed
-        selected_k = self.project.hyperparameters.n_pca_manual
-        if self.project.hyperparameters.n_pca_mode == "auto":
-            self.progress.emit(15, "Running PCA sweep to find optimal dimensions...")
-
-            k_min = self.project.hyperparameters.sweep_k_min
-            k_max = self.project.hyperparameters.sweep_k_max
-            k_step = self.project.hyperparameters.sweep_k_step
-            k_values = list(range(k_min, k_max + 1, k_step))
-
-            selector = pca_sweep(
-                kv=kv,
-                docs=docs,
-                y=y,
-                lexicon=lexicon,
-                use_full_doc=use_full_doc,
-                pca_k_values=k_values,
-                window=self.project.hyperparameters.context_window_size,
-                sif_a=self.project.hyperparameters.sif_a,
-                cluster_topn=self.project.hyperparameters.clustering_topn,
-                k_min=self.project.hyperparameters.clustering_k_min,
-                k_max=self.project.hyperparameters.clustering_k_max,
-                top_words=self.project.hyperparameters.clustering_top_words,
-                weight_by_size=self.project.hyperparameters.weight_by_size,
-                auck_radius=self.project.hyperparameters.auck_radius,
-                beta_smooth_win=self.project.hyperparameters.beta_smooth_win,
-                beta_smooth_kind=self.project.hyperparameters.beta_smooth_kind,
-                out_dir=str(run.run_path),
-                prefix="pca_sweep",
-                save_figures=True,
-            )
-            selected_k = selector.best_k
-
-            if self._is_cancelled:
-                return
-
-        self.progress.emit(40, f"Fitting SSD model (K={selected_k})...")
+        else:
+            # Full doc mode: still needs a non-empty lexicon for SSD constructor
+            # Use all unique tokens from the corpus as a pseudo-lexicon
+            all_tokens = set()
+            for doc in docs:
+                all_tokens.update(doc)
+            lexicon = all_tokens
 
         ssd = SSD(
-            kv=kv,
-            docs=docs,
-            y=y,
-            lexicon=lexicon,
-            l2_normalize_docs=self.project.hyperparameters.l2_normalize_docs,
-            N_PCA=selected_k,
-            use_unit_beta=self.project.hyperparameters.use_unit_beta,
-            window=self.project.hyperparameters.context_window_size,
-            sif_a=self.project.hyperparameters.sif_a,
+            emb, corpus, y, lexicon,
+            window=p.context_window_size,
+            sif_a=p.sif_a,
             use_full_doc=use_full_doc,
         )
 
-        if self._is_cancelled:
-            return
+        return ssd, pre_docs
 
-        self.progress.emit(55, "Extracting model statistics...")
+    def _compute_coverage(self, docs, y, var_type="continuous"):
+        """Compute lexicon coverage if in lexicon mode."""
+        if self.project.concept_mode != "lexicon":
+            return None, None
 
-        results = RunResults(
-            analysis_type="continuous",
-            r2=ssd.r2,
-            r2_adj=ssd.r2_adj,
-            f_stat=ssd.f_stat,
-            f_pvalue=ssd.f_pvalue,
-            beta_norm_stdCN=ssd.beta_norm_stdCN,
-            delta_per_0p10_raw=ssd.delta_per_0p10_raw,
-            iqr_effect_raw=ssd.iqr_effect_raw,
-            y_corr_pred=ssd.y_corr_pred,
-            n_raw=ssd.n_raw,
-            n_kept=ssd.n_kept,
-            n_dropped=ssd.n_dropped,
-            selected_k=selected_k,
-            pca_var_explained=float(ssd.pca_var_explained),
-            lexicon_coverage_summary=cov_summary,
-            lexicon_coverage_per_token=cov_per_token,
-        )
+        lexicon = set(self.project.lexicon_tokens) if self.project.lexicon_tokens else set()
+        if not lexicon:
+            return None, None
 
-        # Get neighbors
-        self.progress.emit(60, "Finding nearest neighbors...")
-        top_words_df = ssd.top_words(n=50, verbose=False)
-
-        results.pos_neighbors = top_words_df[top_words_df["side"] == "pos"].to_dict("records")
-        results.neg_neighbors = top_words_df[top_words_df["side"] == "neg"].to_dict("records")
-
-        if self._is_cancelled:
-            return
-
-        # Clustering
-        self.progress.emit(70, "Clustering neighbors into themes...")
         try:
-            k_min = self.project.hyperparameters.clustering_k_min
-            k_max = self.project.hyperparameters.clustering_k_max
-
-            df_clusters, df_members = ssd.cluster_neighbors(
-                topn=self.project.hyperparameters.clustering_topn,
-                k=None if self.project.hyperparameters.clustering_k_auto else k_min,
-                k_min=k_min,
-                k_max=k_max,
-                random_state=13,
-                top_words=self.project.hyperparameters.clustering_top_words,
-                verbose=False,
+            from ssdiff.utils.lexicon import coverage_by_lexicon
+            cov_summary, cov_per_token = coverage_by_lexicon(
+                (docs, y), lexicon=lexicon, var_type=var_type,
             )
-            results.clusters_summary = df_clusters.to_dict("records")
-            results.clusters_members = df_members.to_dict("records")
+            return cov_summary, cov_per_token
         except Exception as e:
-            _debug_log(f"[continuous] Clustering failed: {e}\n{traceback.format_exc()}")
+            _debug_log(f"Lexicon coverage failed: {e}\n{traceback.format_exc()}")
+            return None, None
 
-        if self._is_cancelled:
-            return
+    def _cache_interpretation(self, result, pre_docs, project):
+        """Cache interpretation data (neighbors, clusters, snippets) on the ssdiff result.
 
-        # Snippets
-        self.progress.emit(80, "Extracting text snippets...")
+        Called before saving so that the cached data persists in results.pkl.
+        """
+        clustering_topn = project.clustering_topn
+
+        result.top_words(n=50)
+
+        try:
+            k = None if project.clustering_k_auto else project.clustering_k_min
+            result.cluster_neighbors(
+                side="pos", topn=clustering_topn,
+                k=k, k_min=project.clustering_k_min, k_max=project.clustering_k_max,
+            )
+            result.cluster_neighbors(
+                side="neg", topn=clustering_topn,
+                k=k, k_min=project.clustering_k_min, k_max=project.clustering_k_max,
+            )
+        except Exception as e:
+            _debug_log(f"Clustering failed: {e}\n{traceback.format_exc()}")
+
         if pre_docs:
             try:
-                cluster_snips = ssd.cluster_snippets(
-                    pre_docs=pre_docs,
-                    side="both",
-                    top_per_cluster=100,
-                )
-                results.cluster_snippets_pos = cluster_snips["pos"].to_dict("records")
-                results.cluster_snippets_neg = cluster_snips["neg"].to_dict("records")
+                result.snippets(pre_docs, top_per_side=200)
             except Exception as e:
-                _debug_log(f"[continuous] Cluster snippets failed: {e}\n{traceback.format_exc()}")
+                _debug_log(f"Snippets failed: {e}\n{traceback.format_exc()}")
 
             try:
-                beta_snips = ssd.beta_snippets(
-                    pre_docs=pre_docs,
-                    window_sentences=1,
-                    top_per_side=200,
-                )
-                results.beta_snippets_pos = beta_snips["beta_pos"].to_dict("records")
-                results.beta_snippets_neg = beta_snips["beta_neg"].to_dict("records")
+                result.cluster_snippets(pre_docs, top_per_cluster=100)
             except Exception as e:
-                _debug_log(f"[continuous] Beta snippets failed: {e}\n{traceback.format_exc()}")
+                _debug_log(f"Cluster snippets failed: {e}\n{traceback.format_exc()}")
 
-        if self._is_cancelled:
-            return
-
-        # Per-document scores
-        self.progress.emit(90, "Computing document scores...")
+    def _resolve_random_state(self, rs_str: str) -> int:
+        """Convert "default" or str(int) to an int seed."""
+        if rs_str == "default":
+            return DEFAULT_RANDOM_SEED
         try:
-            scores_df = ssd.ssd_scores(include_all=True)
-            results.doc_scores = scores_df.to_dict("records")
-        except Exception as e:
-            _debug_log(f"[continuous] Document scores failed: {e}\n{traceback.format_exc()}")
-
-        # Finalize run
-        run.results = results
-        run.status = "complete"
-        run.ssd_model = ssd
-
-        self.progress.emit(95, "Saving results...")
-        ProjectIO.save_run_config(run)
-        ProjectIO.save_run_results(run)
-
-        self.progress.emit(100, "Complete!")
-        self.finished.emit(run)
+            return int(rs_str)
+        except (ValueError, TypeError):
+            return DEFAULT_RANDOM_SEED
 
     # ------------------------------------------------------------------ #
-    #  Crossgroup pipeline (new)
+    #  PLS pipeline
     # ------------------------------------------------------------------ #
 
-    def _run_crossgroup(self, run: Run):
-        """Execute the crossgroup SSD analysis pipeline."""
+    def _run_pls(self, result: Result):
         _ensure_streams()
-        from ssdiff import SSDGroup
+        p = self.project
 
-        self.progress.emit(5, "Loading cached data...")
-        kv = self.project._cached_kv
-        docs = self.project._cached_docs
-        groups = self.project._cached_groups
-        pre_docs = self.project._cached_pre_docs
-
-        if kv is None or docs is None or groups is None:
-            raise ValueError(
-                "Cached data not available. Please select a group column."
-            )
+        self.progress.emit(5, "Building SSD model...")
+        ssd, pre_docs = self._build_ssd()
 
         if self._is_cancelled:
             return
 
-        # Prepare lexicon
-        lexicon = None
-        use_full_doc = True
-        cov_summary = None
-        cov_per_token = None
-        if self.concept_config.mode == "lexicon":
-            lexicon = self.concept_config.lexicon_tokens
-            use_full_doc = False
-            if not lexicon:
-                raise ValueError("Lexicon mode selected but no tokens provided.")
-
-            self.progress.emit(10, "Computing lexicon coverage...")
-            try:
-                from ssdiff import coverage_by_lexicon
-                cov_summary, cov_per_token_df = coverage_by_lexicon(
-                    (docs, groups), lexicon=lexicon, var_type="categorical"
-                )
-                cov_per_token = cov_per_token_df.to_dict("records")
-            except Exception as e:
-                _debug_log(f"[crossgroup] Lexicon coverage failed: {e}\n{traceback.format_exc()}")
-
-        if self._is_cancelled:
-            return
-
-        # Fit SSDGroup
-        n_perm = self.concept_config.n_perm
-        self.progress.emit(15, f"Fitting SSDGroup (n_perm={n_perm})...")
-
-        sg = SSDGroup(
-            kv=kv,
-            docs=docs,
-            groups=groups,
-            lexicon=lexicon,
-            n_perm=n_perm,
-            window=self.project.hyperparameters.context_window_size,
-            sif_a=self.project.hyperparameters.sif_a,
-            l2_normalize_docs=self.project.hyperparameters.l2_normalize_docs,
-            use_full_doc=use_full_doc,
+        # Coverage
+        self.progress.emit(10, "Computing lexicon coverage...")
+        cov_summary, cov_per_token = self._compute_coverage(
+            self.project._docs, self.project._y,
         )
 
         if self._is_cancelled:
             return
 
-        self.progress.emit(50, "Extracting omnibus results...")
+        # Resolve parameters
+        n_comp = p.pls_n_components if p.pls_n_components != 0 else "auto"
+        p_method = p.pls_p_method if p.pls_p_method != "none" else None
+        random_state = self._resolve_random_state(p.pls_random_state)
 
-        # Build group counts (from kept docs only)
-        import numpy as np
-        group_labels = sorted(sg.group_labels)
-        group_counts = {g: int((sg.groups_kept == g).sum()) for g in group_labels}
+        self.progress.emit(15, f"Fitting PLS (n_comp={n_comp}, p_method={p_method})...")
 
-        # Get results table
-        results_table_df = sg.results_table()
-        pairwise_table = results_table_df.to_dict("records")
-
-        # Initialize results
-        results = RunResults(
-            analysis_type="crossgroup",
-            n_raw=sg.n_raw,
-            n_kept=sg.n_kept,
-            n_dropped=sg.n_dropped,
-            omnibus_p=float(sg.omnibus_p),
-            omnibus_T=float(sg.omnibus_T),
-            n_perm=n_perm,
-            group_labels=group_labels,
-            group_counts=group_counts,
-            pairwise_table=pairwise_table,
-            lexicon_coverage_summary=cov_summary,
-            lexicon_coverage_per_token=cov_per_token,
+        ssd_result = ssd.fit_pls(
+            n_components=n_comp,
+            pca_preprocess=p.pls_pca_preprocess,
+            p_method=p_method,
+            n_perm=p.pls_n_perm,
+            n_splits=p.pls_n_splits,
+            split_ratio=p.pls_split_ratio,
+            random_state=random_state,
         )
 
         if self._is_cancelled:
             return
 
-        # Extract per-contrast results
-        self.progress.emit(55, "Extracting pairwise contrasts...")
-        contrast_results = {}
-        pairs = list(sg.pairwise)
-        n_pairs = len(pairs)
+        self.progress.emit(55, "Caching interpretation data...")
 
-        hp = self.project.hyperparameters
+        # Cache interpretation on the ssdiff result
+        self._cache_interpretation(ssd_result, pre_docs, p)
 
-        for idx, (g1, g2) in enumerate(pairs):
-            if self._is_cancelled:
-                return
+        if self._is_cancelled:
+            return
 
-            pair_key = f"{g1} vs {g2}"
-            pct = 55 + int(35 * (idx / max(n_pairs, 1)))
-            self.progress.emit(pct, f"Processing contrast: {pair_key}...")
+        self.progress.emit(90, "Saving results...")
+        self._finalize_result(result, ssd_result,
+                              cov_summary=cov_summary, cov_per_token=cov_per_token)
 
-            contrast = sg.get_contrast(g1, g2)
-            cr = {}
+    # ------------------------------------------------------------------ #
+    #  PCA+OLS pipeline
+    # ------------------------------------------------------------------ #
 
-            # Per-pair stats from results table
-            pair_row = results_table_df[
-                (results_table_df["group_A"] == g1) &
-                (results_table_df["group_B"] == g2)
-            ]
-            if len(pair_row) > 0:
-                row = pair_row.iloc[0]
-                cr["p_raw"] = float(row.get("p_raw", 0))
-                cr["p_corrected"] = float(row.get("p_corrected", 0))
-                cr["cohens_d"] = float(row.get("cohens_d", 0))
-                cr["cosine_distance"] = float(row.get("cosine_distance", 0))
-                cr["contrast_norm"] = float(row.get("contrast_norm", 0))
-                cr["n_g1"] = int(row.get("n_A", 0))
-                cr["n_g2"] = int(row.get("n_B", 0))
+    def _run_pca_ols(self, result: Result):
+        _ensure_streams()
+        p = self.project
 
-            # Top words (neighbors)
+        self.progress.emit(5, "Building SSD model...")
+        ssd, pre_docs = self._build_ssd()
+
+        if self._is_cancelled:
+            return
+
+        # Coverage
+        self.progress.emit(10, "Computing lexicon coverage...")
+        cov_summary, cov_per_token = self._compute_coverage(
+            self.project._docs, self.project._y,
+        )
+
+        if self._is_cancelled:
+            return
+
+        # Resolve parameters
+        n_comp = p.pcaols_n_components  # None = sweep
+        sweep_msg = "sweep" if n_comp is None else f"K={n_comp}"
+        self.progress.emit(15, f"Fitting PCA+OLS ({sweep_msg})...")
+
+        ssd_result = ssd.fit_ols(
+            n_components=n_comp,
+            k_min=p.sweep_k_min,
+            k_max=p.sweep_k_max,
+            k_step=p.sweep_k_step,
+        )
+
+        if self._is_cancelled:
+            return
+
+        self.progress.emit(50, "Saving sweep data...")
+
+        # Save sweep data as JSON (rendered in the GUI via QPainter)
+        if ssd_result.sweep_result is not None:
             try:
-                top_words_df = contrast.top_words(n=50, verbose=False)
-                cr["pos_neighbors"] = top_words_df[
-                    top_words_df["side"] == "pos"
-                ].to_dict("records")
-                cr["neg_neighbors"] = top_words_df[
-                    top_words_df["side"] == "neg"
-                ].to_dict("records")
+                sweep = ssd_result.sweep_result
+                clean_rows = [
+                    {k: _sanitize_for_json(val) for k, val in row.items()}
+                    for row in sweep.df_joined
+                ]
+                sweep_path = result.result_path / "sweep_data.json"
+                with open(sweep_path, "w") as f:
+                    json.dump({"best_k": int(sweep.best_k), "rows": clean_rows}, f)
             except Exception as e:
-                _debug_log(f"[crossgroup] Top words failed for {pair_key}: {e}\n{traceback.format_exc()}")
-                cr["pos_neighbors"] = []
-                cr["neg_neighbors"] = []
+                _debug_log(f"[pca_ols] Sweep data save failed: {e}\n{traceback.format_exc()}")
 
-            # Clustering
-            try:
-                df_clusters, df_members = contrast.cluster_neighbors(
-                    topn=hp.clustering_topn,
-                    k=None if hp.clustering_k_auto else hp.clustering_k_min,
-                    k_min=hp.clustering_k_min,
-                    k_max=hp.clustering_k_max,
-                    random_state=13,
-                    top_words=hp.clustering_top_words,
-                    verbose=False,
-                )
-                cr["clusters_summary"] = df_clusters.to_dict("records")
-                cr["clusters_members"] = df_members.to_dict("records")
-            except Exception as e:
-                _debug_log(f"[crossgroup] Clustering failed for {pair_key}: {e}\n{traceback.format_exc()}")
-                cr["clusters_summary"] = []
-                cr["clusters_members"] = []
+        self.progress.emit(55, "Caching interpretation data...")
 
-            # Snippets
-            if pre_docs:
-                try:
-                    cluster_snips = contrast.cluster_snippets(
-                        pre_docs=pre_docs,
-                        side="both",
-                        top_per_cluster=100,
-                    )
-                    cr["cluster_snippets_pos"] = cluster_snips["pos"].to_dict("records")
-                    cr["cluster_snippets_neg"] = cluster_snips["neg"].to_dict("records")
-                except Exception as e:
-                    _debug_log(f"[crossgroup] Cluster snippets failed for {pair_key}: {e}\n{traceback.format_exc()}")
-                    cr["cluster_snippets_pos"] = []
-                    cr["cluster_snippets_neg"] = []
+        # Cache interpretation on the ssdiff result
+        self._cache_interpretation(ssd_result, pre_docs, p)
 
-                try:
-                    beta_snips = contrast.beta_snippets(
-                        pre_docs=pre_docs,
-                        top_per_side=200,
-                    )
-                    cr["beta_snippets_pos"] = beta_snips["beta_pos"].to_dict("records")
-                    cr["beta_snippets_neg"] = beta_snips["beta_neg"].to_dict("records")
-                except Exception as e:
-                    _debug_log(f"[crossgroup] Beta snippets failed for {pair_key}: {e}\n{traceback.format_exc()}")
-                    cr["beta_snippets_pos"] = []
-                    cr["beta_snippets_neg"] = []
+        if self._is_cancelled:
+            return
 
-            # Contrast scores
-            try:
-                scores_df = sg.contrast_scores(g1, g2)
-                cr["contrast_scores"] = scores_df.to_dict("records")
-            except Exception as e:
-                _debug_log(f"[crossgroup] Contrast scores failed for {pair_key}: {e}\n{traceback.format_exc()}")
-                cr["contrast_scores"] = []
+        self.progress.emit(90, "Saving results...")
+        self._finalize_result(result, ssd_result,
+                              cov_summary=cov_summary, cov_per_token=cov_per_token)
 
-            contrast_results[pair_key] = cr
+    # ------------------------------------------------------------------ #
+    #  Groups pipeline
+    # ------------------------------------------------------------------ #
 
-        results.contrast_results = contrast_results
+    def _run_groups(self, result: Result):
+        _ensure_streams()
+        p = self.project
 
-        # For the first contrast, also populate top-level fields
-        # so that Stage 3 can display something immediately
-        if contrast_results:
-            first_key = list(contrast_results.keys())[0]
-            first = contrast_results[first_key]
-            results.pos_neighbors = first.get("pos_neighbors", [])
-            results.neg_neighbors = first.get("neg_neighbors", [])
-            results.clusters_summary = first.get("clusters_summary", [])
-            results.clusters_members = first.get("clusters_members", [])
-            results.cluster_snippets_pos = first.get("cluster_snippets_pos", [])
-            results.cluster_snippets_neg = first.get("cluster_snippets_neg", [])
-            results.beta_snippets_pos = first.get("beta_snippets_pos", [])
-            results.beta_snippets_neg = first.get("beta_snippets_neg", [])
-            results.doc_scores = first.get("contrast_scores", [])
+        self.progress.emit(5, "Building SSD model...")
+        ssd, pre_docs = self._build_ssd()
 
-        # Finalize
-        run.results = results
-        run.status = "complete"
-        run.ssd_group_model = sg
+        if self._is_cancelled:
+            return
 
-        self.progress.emit(95, "Saving results...")
-        ProjectIO.save_run_config(run)
-        ProjectIO.save_run_results(run)
+        # Coverage
+        self.progress.emit(10, "Computing lexicon coverage...")
+        cov_summary, cov_per_token = self._compute_coverage(
+            self.project._docs, self.project._groups,
+            var_type="categorical",
+        )
+
+        if self._is_cancelled:
+            return
+
+        random_state = self._resolve_random_state(p.groups_random_state)
+
+        self.progress.emit(15, f"Fitting group comparison (n_perm={p.groups_n_perm})...")
+
+        ssd_result = ssd.fit_groups(
+            median_split=p.groups_median_split,
+            n_perm=p.groups_n_perm,
+            correction=p.groups_correction,
+            random_state=random_state,
+        )
+
+        if self._is_cancelled:
+            return
+
+        self.progress.emit(50, "Caching interpretation data...")
+
+        self._cache_interpretation(ssd_result, pre_docs, p)
+
+        if self._is_cancelled:
+            return
+
+        self.progress.emit(90, "Saving results...")
+        self._finalize_result(result, ssd_result,
+                              cov_summary=cov_summary, cov_per_token=cov_per_token)
+
+    # ------------------------------------------------------------------ #
+    #  Finalize
+    # ------------------------------------------------------------------ #
+
+    def _finalize_result(self, result, ssd_result,
+                         cov_summary=None, cov_per_token=None):
+        """Save result and emit completion signal."""
+        result._result = ssd_result
+        result.status = "complete"
+
+        if cov_summary is not None:
+            result.config_snapshot["lexicon_coverage_summary"] = cov_summary
+        if cov_per_token is not None:
+            result.config_snapshot["lexicon_coverage_per_token"] = cov_per_token
+
+        ProjectIO.save_result_config(result)
+        ProjectIO.save_result(result)
 
         self.progress.emit(100, "Complete!")
-        self.finished.emit(run)
+        self.finished.emit(result)

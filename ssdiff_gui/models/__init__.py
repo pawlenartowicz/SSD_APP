@@ -1,23 +1,8 @@
 """Data models for SSD."""
 
-from .project import (
-    DatasetConfig,
-    SpacyConfig,
-    EmbeddingConfig,
-    HyperparametersConfig,
-    ConceptConfig,
-    RunResults,
-    Run,
-    Project,
-)
+from .project import Project, Result
 
 __all__ = [
-    "DatasetConfig",
-    "SpacyConfig",
-    "EmbeddingConfig",
-    "HyperparametersConfig",
-    "ConceptConfig",
-    "RunResults",
-    "Run",
     "Project",
+    "Result",
 ]

@@ -1,576 +1,601 @@
-"""Project data model for SSD.
+"""Flat project data model for SSD.
 
-Contains all dataclasses representing project configuration,
-run results, and cached data.
+Two classes: Project (all config + computed readiness + validation)
+and Result (config snapshot + results reference).
 """
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, List, Dict, Set, Any, Tuple
+from typing import Optional, List, Any, Tuple
 from datetime import datetime
 
-
-@dataclass
-class DatasetConfig:
-    """Configuration for the loaded dataset."""
-    csv_path: Optional[Path] = None
-    csv_encoding: str = "utf-8-sig"
-    text_column: Optional[str] = None
-    outcome_column: Optional[str] = None
-    id_column: Optional[str] = None
-    group_column: Optional[str] = None
-    n_rows: int = 0
-    n_valid: int = 0
-    cached: bool = False
-
-    # Analysis configuration (set in Setup tab)
-    analysis_type: str = "continuous"  # "continuous" or "crossgroup"
-    concept_mode: str = "lexicon"  # "lexicon" or "fulldoc"
-    n_perm: int = 5000  # permutation count for crossgroup
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dict."""
-        return {
-            "csv_path": str(self.csv_path) if self.csv_path else None,
-            "csv_encoding": self.csv_encoding,
-            "text_column": self.text_column,
-            "outcome_column": self.outcome_column,
-            "id_column": self.id_column,
-            "group_column": self.group_column,
-            "n_rows": self.n_rows,
-            "n_valid": self.n_valid,
-            "cached": self.cached,
-            "analysis_type": self.analysis_type,
-            "concept_mode": self.concept_mode,
-            "n_perm": self.n_perm,
-        }
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "DatasetConfig":
-        """Create from dict."""
-        return cls(
-            csv_path=Path(d["csv_path"]) if d.get("csv_path") else None,
-            csv_encoding=d.get("csv_encoding", "utf-8-sig"),
-            text_column=d.get("text_column"),
-            outcome_column=d.get("outcome_column"),
-            id_column=d.get("id_column"),
-            group_column=d.get("group_column"),
-            n_rows=d.get("n_rows", 0),
-            n_valid=d.get("n_valid", 0),
-            cached=d.get("cached", False),
-            analysis_type=d.get("analysis_type", "continuous"),
-            concept_mode=d.get("concept_mode", "lexicon"),
-            n_perm=d.get("n_perm", 5000),
-        )
+DEFAULT_RANDOM_SEED = 2137
 
 
 @dataclass
-class SpacyConfig:
-    """Configuration for spaCy text processing."""
-    language: str = "en"
-    model: str = "en_core_web_sm"
-    custom_model_path: Optional[Path] = None
-    lemmatize: bool = True
-    remove_stopwords: bool = True
-    processed: bool = False
-    n_docs_processed: int = 0
-    total_tokens: int = 0
-    mean_words_before_stopwords: float = 0.0
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dict."""
-        return {
-            "language": self.language,
-            "model": self.model,
-            "custom_model_path": str(self.custom_model_path) if self.custom_model_path else None,
-            "lemmatize": self.lemmatize,
-            "remove_stopwords": self.remove_stopwords,
-            "processed": self.processed,
-            "n_docs_processed": self.n_docs_processed,
-            "total_tokens": self.total_tokens,
-            "mean_words_before_stopwords": self.mean_words_before_stopwords,
-        }
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "SpacyConfig":
-        """Create from dict."""
-        return cls(
-            language=d.get("language", "en"),
-            model=d.get("model", "en_core_web_sm"),
-            custom_model_path=Path(d["custom_model_path"]) if d.get("custom_model_path") else None,
-            lemmatize=d.get("lemmatize", True),
-            remove_stopwords=d.get("remove_stopwords", True),
-            processed=d.get("processed", False),
-            n_docs_processed=d.get("n_docs_processed", 0),
-            total_tokens=d.get("total_tokens", 0),
-            mean_words_before_stopwords=d.get("mean_words_before_stopwords", 0.0),
-        )
-
-
-@dataclass
-class EmbeddingConfig:
-    """Configuration for word embeddings."""
-    model_type: str = "custom"  # "known" or "custom"
-    model_name: Optional[str] = None  # e.g., "GloVe 300d"
-    model_path: Optional[Path] = None
-    l2_normalize: bool = True
-    abtt_enabled: bool = True
-    abtt_m: int = 1
-    loaded: bool = False
-    vocab_size: int = 0
-    embedding_dim: int = 0
-    coverage_pct: float = 0.0
-    n_oov: int = 0
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dict."""
-        return {
-            "model_type": self.model_type,
-            "model_name": self.model_name,
-            "model_path": str(self.model_path) if self.model_path else None,
-            "l2_normalize": self.l2_normalize,
-            "abtt_enabled": self.abtt_enabled,
-            "abtt_m": self.abtt_m,
-            "loaded": self.loaded,
-            "vocab_size": self.vocab_size,
-            "embedding_dim": self.embedding_dim,
-            "coverage_pct": self.coverage_pct,
-            "n_oov": self.n_oov,
-        }
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "EmbeddingConfig":
-        """Create from dict."""
-        return cls(
-            model_type=d.get("model_type", "custom"),
-            model_name=d.get("model_name"),
-            model_path=Path(d["model_path"]) if d.get("model_path") else None,
-            l2_normalize=d.get("l2_normalize", True),
-            abtt_enabled=d.get("abtt_enabled", True),
-            abtt_m=d.get("abtt_m", 1),
-            loaded=d.get("loaded", False),
-            vocab_size=d.get("vocab_size", 0),
-            embedding_dim=d.get("embedding_dim", 0),
-            coverage_pct=d.get("coverage_pct", 0.0),
-            n_oov=d.get("n_oov", 0),
-        )
-
-
-@dataclass
-class HyperparametersConfig:
-    """Configuration for SSD model hyperparameters."""
-    # PCA
-    n_pca_mode: str = "auto"  # "auto" or "manual"
-    n_pca_manual: Optional[int] = 20
-    sweep_k_min: int = 1
-    sweep_k_max: int = 80
-    sweep_k_step: int = 1
-    sweep_stability_criterion: str = "elbow"
-
-    # Context
-    context_window_size: int = 3
-    sif_a: float = 1e-3
-
-    # Beta
-    use_unit_beta: bool = True
-
-    # Clustering
-    clustering_topn: int = 100
-    clustering_k_auto: bool = True
-    clustering_k_min: int = 2
-    clustering_k_max: int = 10
-
-    # Doc normalization
-    l2_normalize_docs: bool = True
-
-    # PCA sweep advanced
-    auck_radius: int = 3
-    beta_smooth_win: int = 7
-    beta_smooth_kind: str = "median"
-    weight_by_size: bool = True
-
-    # Clustering advanced
-    clustering_top_words: int = 10
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dict."""
-        return {
-            "n_pca_mode": self.n_pca_mode,
-            "n_pca_manual": self.n_pca_manual,
-            "sweep_k_min": self.sweep_k_min,
-            "sweep_k_max": self.sweep_k_max,
-            "sweep_k_step": self.sweep_k_step,
-            "sweep_stability_criterion": self.sweep_stability_criterion,
-            "context_window_size": self.context_window_size,
-            "sif_a": self.sif_a,
-            "use_unit_beta": self.use_unit_beta,
-            "clustering_topn": self.clustering_topn,
-            "clustering_k_auto": self.clustering_k_auto,
-            "clustering_k_min": self.clustering_k_min,
-            "clustering_k_max": self.clustering_k_max,
-            "l2_normalize_docs": self.l2_normalize_docs,
-            "auck_radius": self.auck_radius,
-            "beta_smooth_win": self.beta_smooth_win,
-            "beta_smooth_kind": self.beta_smooth_kind,
-            "weight_by_size": self.weight_by_size,
-            "clustering_top_words": self.clustering_top_words,
-        }
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "HyperparametersConfig":
-        """Create from dict."""
-        return cls(
-            n_pca_mode=d.get("n_pca_mode", "auto"),
-            n_pca_manual=d.get("n_pca_manual", 20),
-            sweep_k_min=d.get("sweep_k_min", 1),
-            sweep_k_max=d.get("sweep_k_max", 80),
-            sweep_k_step=d.get("sweep_k_step", 1),
-            sweep_stability_criterion=d.get("sweep_stability_criterion", "elbow"),
-            context_window_size=d.get("context_window_size", 3),
-            sif_a=d.get("sif_a", 1e-3),
-            use_unit_beta=d.get("use_unit_beta", True),
-            clustering_topn=d.get("clustering_topn", 100),
-            clustering_k_auto=d.get("clustering_k_auto", True),
-            clustering_k_min=d.get("clustering_k_min", 2),
-            clustering_k_max=d.get("clustering_k_max", 10),
-            l2_normalize_docs=d.get("l2_normalize_docs", True),
-            auck_radius=d.get("auck_radius", 3),
-            beta_smooth_win=d.get("beta_smooth_win", 7),
-            beta_smooth_kind=d.get("beta_smooth_kind", "median"),
-            weight_by_size=d.get("weight_by_size", True),
-            clustering_top_words=d.get("clustering_top_words", 10),
-        )
-
-
-@dataclass
-class ConceptConfig:
-    """Configuration for concept definition (Stage 2)."""
-    mode: str = "lexicon"  # "lexicon" or "fulldoc"
-    lexicon_tokens: Optional[Set[str]] = None
-    min_hits_per_doc: Optional[int] = None
-    drop_no_hits: bool = True
-    stoplist: Optional[Set[str]] = None  # for fulldoc mode
-
-    # Analysis type: "continuous" or "crossgroup"
-    analysis_type: str = "continuous"
-    outcome_column: Optional[str] = None
-    group_column: Optional[str] = None
-    n_perm: int = 5000  # permutation count for crossgroup
-
-    # Computed stats
-    coverage_pct: float = 0.0
-    n_docs_with_hits: int = 0
-    median_hits: float = 0.0
-    mean_hits: float = 0.0
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dict."""
-        return {
-            "mode": self.mode,
-            "lexicon_tokens": list(self.lexicon_tokens) if self.lexicon_tokens else None,
-            "min_hits_per_doc": self.min_hits_per_doc,
-            "drop_no_hits": self.drop_no_hits,
-            "stoplist": list(self.stoplist) if self.stoplist else None,
-            "analysis_type": self.analysis_type,
-            "outcome_column": self.outcome_column,
-            "group_column": self.group_column,
-            "n_perm": self.n_perm,
-            "coverage_pct": self.coverage_pct,
-            "n_docs_with_hits": self.n_docs_with_hits,
-            "median_hits": self.median_hits,
-            "mean_hits": self.mean_hits,
-        }
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "ConceptConfig":
-        """Create from dict."""
-        return cls(
-            mode=d.get("mode", "lexicon"),
-            lexicon_tokens=set(d["lexicon_tokens"]) if d.get("lexicon_tokens") else None,
-            min_hits_per_doc=d.get("min_hits_per_doc"),
-            drop_no_hits=d.get("drop_no_hits", True),
-            stoplist=set(d["stoplist"]) if d.get("stoplist") else None,
-            analysis_type=d.get("analysis_type", "continuous"),
-            outcome_column=d.get("outcome_column"),
-            group_column=d.get("group_column"),
-            n_perm=d.get("n_perm", 5000),
-            coverage_pct=d.get("coverage_pct", 0.0),
-            n_docs_with_hits=d.get("n_docs_with_hits", 0),
-            median_hits=d.get("median_hits", 0.0),
-            mean_hits=d.get("mean_hits", 0.0),
-        )
-
-
-@dataclass
-class RunResults:
-    """Results from a completed SSD run."""
-    # Analysis type
-    analysis_type: str = "continuous"  # "continuous" or "crossgroup"
-
-    # Model fit statistics (continuous)
-    r2: float = 0.0
-    r2_adj: float = 0.0
-    f_stat: float = 0.0
-    f_pvalue: float = 0.0
-
-    # Effect sizes (continuous)
-    beta_norm_stdCN: float = 0.0
-    delta_per_0p10_raw: float = 0.0
-    iqr_effect_raw: float = 0.0
-    y_corr_pred: float = 0.0
-
-    # Sample info
-    n_raw: int = 0
-    n_kept: int = 0
-    n_dropped: int = 0
-
-    # Interpretation data (continuous, or per-contrast for crossgroup)
-    pos_neighbors: List[Tuple[str, float]] = field(default_factory=list)
-    neg_neighbors: List[Tuple[str, float]] = field(default_factory=list)
-
-    # Clustering (if performed)
-    clusters_summary: Optional[List[Dict]] = None
-    clusters_members: Optional[List[Dict]] = None
-
-    # Snippets (if extracted)
-    cluster_snippets_pos: Optional[List[Dict]] = None
-    cluster_snippets_neg: Optional[List[Dict]] = None
-    beta_snippets_pos: Optional[List[Dict]] = None
-    beta_snippets_neg: Optional[List[Dict]] = None
-
-    # Per-doc scores
-    doc_scores: Optional[List[Dict]] = None
-
-    # PCA selection (if auto)
-    selected_k: Optional[int] = None
-    pca_var_explained: float = 0.0
-
-    # Lexicon coverage (if lexicon mode)
-    lexicon_coverage_summary: Optional[Dict] = None
-    lexicon_coverage_per_token: Optional[List[Dict]] = None
-
-    # Crossgroup-specific (None for continuous runs)
-    omnibus_p: Optional[float] = None
-    omnibus_T: Optional[float] = None
-    n_perm: Optional[int] = None
-    group_labels: Optional[List[str]] = None
-    group_counts: Optional[Dict[str, int]] = None
-    pairwise_table: Optional[List[Dict]] = None  # results_table() as records
-
-    # Per-contrast results: Dict keyed by "groupA vs groupB"
-    contrast_results: Optional[Dict[str, Dict]] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dict."""
-        return {
-            "analysis_type": self.analysis_type,
-            "r2": self.r2,
-            "r2_adj": self.r2_adj,
-            "f_stat": self.f_stat,
-            "f_pvalue": self.f_pvalue,
-            "beta_norm_stdCN": self.beta_norm_stdCN,
-            "delta_per_0p10_raw": self.delta_per_0p10_raw,
-            "iqr_effect_raw": self.iqr_effect_raw,
-            "y_corr_pred": self.y_corr_pred,
-            "n_raw": self.n_raw,
-            "n_kept": self.n_kept,
-            "n_dropped": self.n_dropped,
-            "pos_neighbors": self.pos_neighbors,
-            "neg_neighbors": self.neg_neighbors,
-            "clusters_summary": self.clusters_summary,
-            "clusters_members": self.clusters_members,
-            "cluster_snippets_pos": self.cluster_snippets_pos,
-            "cluster_snippets_neg": self.cluster_snippets_neg,
-            "beta_snippets_pos": self.beta_snippets_pos,
-            "beta_snippets_neg": self.beta_snippets_neg,
-            "doc_scores": self.doc_scores,
-            "selected_k": self.selected_k,
-            "pca_var_explained": self.pca_var_explained,
-            "lexicon_coverage_summary": self.lexicon_coverage_summary,
-            "lexicon_coverage_per_token": self.lexicon_coverage_per_token,
-            "omnibus_p": self.omnibus_p,
-            "omnibus_T": self.omnibus_T,
-            "n_perm": self.n_perm,
-            "group_labels": self.group_labels,
-            "group_counts": self.group_counts,
-            "pairwise_table": self.pairwise_table,
-            "contrast_results": self.contrast_results,
-        }
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "RunResults":
-        """Create from dict."""
-        return cls(
-            analysis_type=d.get("analysis_type", "continuous"),
-            r2=d.get("r2", 0.0),
-            r2_adj=d.get("r2_adj", 0.0),
-            f_stat=d.get("f_stat", 0.0),
-            f_pvalue=d.get("f_pvalue", 0.0),
-            beta_norm_stdCN=d.get("beta_norm_stdCN", 0.0),
-            delta_per_0p10_raw=d.get("delta_per_0p10_raw", 0.0),
-            iqr_effect_raw=d.get("iqr_effect_raw", 0.0),
-            y_corr_pred=d.get("y_corr_pred", 0.0),
-            n_raw=d.get("n_raw", 0),
-            n_kept=d.get("n_kept", 0),
-            n_dropped=d.get("n_dropped", 0),
-            pos_neighbors=d.get("pos_neighbors", []),
-            neg_neighbors=d.get("neg_neighbors", []),
-            clusters_summary=d.get("clusters_summary"),
-            clusters_members=d.get("clusters_members"),
-            cluster_snippets_pos=d.get("cluster_snippets_pos"),
-            cluster_snippets_neg=d.get("cluster_snippets_neg"),
-            beta_snippets_pos=d.get("beta_snippets_pos"),
-            beta_snippets_neg=d.get("beta_snippets_neg"),
-            doc_scores=d.get("doc_scores"),
-            selected_k=d.get("selected_k"),
-            pca_var_explained=d.get("pca_var_explained", 0.0),
-            lexicon_coverage_summary=d.get("lexicon_coverage_summary"),
-            lexicon_coverage_per_token=d.get("lexicon_coverage_per_token"),
-            omnibus_p=d.get("omnibus_p"),
-            omnibus_T=d.get("omnibus_T"),
-            n_perm=d.get("n_perm"),
-            group_labels=d.get("group_labels"),
-            group_counts=d.get("group_counts"),
-            pairwise_table=d.get("pairwise_table"),
-            contrast_results=d.get("contrast_results"),
-        )
-
-
-@dataclass
-class Run:
-    """A single SSD run with frozen config and results."""
-    run_id: str  # Format: YYYYMMDD_HHMMSS
+class Result:
+    """A single SSD analysis result with a flat config snapshot."""
+    result_id: str                   # YYYYMMDD_HHMMSS
     timestamp: datetime
-    run_path: Path
+    result_path: Path
+    config_snapshot: dict            # flat copy of all config at run time
 
-    # Concept configuration (Stage 2)
-    concept_config: ConceptConfig
-
-    # Frozen snapshot of project settings
-    frozen_dataset_config: DatasetConfig
-    frozen_spacy_config: SpacyConfig
-    frozen_embedding_config: EmbeddingConfig
-    frozen_hyperparameters: HyperparametersConfig
-
-    # User-assigned name (required for archiving)
-    name: Optional[str] = None
-
-    # Results
-    results: Optional[RunResults] = None
-    status: str = "pending"  # pending, running, complete, error
+    name: Optional[str] = None      # user-assigned name for archiving
+    status: str = "pending"         # pending, running, complete, error, interrupted
     error_message: Optional[str] = None
 
-    # Cached objects (not serialized)
-    ssd_model: Optional[Any] = None  # The actual SSD object
-    ssd_group_model: Optional[Any] = None  # Cached SSDGroup (not serialized)
+    # Runtime only (not serialized)
+    _result: Optional[Any] = field(default=None, repr=False)   # ssdiff PLSResult/PCAOLSResult/GroupResult
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dict."""
+    def to_dict(self) -> dict:
+        """Serialize result metadata + config snapshot to JSON-friendly dict."""
         return {
-            "run_id": self.run_id,
+            "result_id": self.result_id,
             "name": self.name,
             "timestamp": self.timestamp.isoformat(),
-            "run_path": str(self.run_path),
-            "concept_config": self.concept_config.to_dict(),
-            "frozen_dataset_config": self.frozen_dataset_config.to_dict(),
-            "frozen_spacy_config": self.frozen_spacy_config.to_dict(),
-            "frozen_embedding_config": self.frozen_embedding_config.to_dict(),
-            "frozen_hyperparameters": self.frozen_hyperparameters.to_dict(),
+            "result_path": str(self.result_path),
+            "config_snapshot": self.config_snapshot,
             "status": self.status,
             "error_message": self.error_message,
-            # results saved separately as pickle
         }
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any], run_path: Path) -> "Run":
-        """Create from dict."""
-        return cls(
-            run_id=d["run_id"],
-            name=d.get("name"),
+    def from_dict(cls, d: dict, result_path: Path) -> "Result":
+        """Reconstruct Result from saved dict."""
+        result = cls(
+            result_id=d.get("result_id") or d["run_id"],
             timestamp=datetime.fromisoformat(d["timestamp"]),
-            run_path=run_path,
-            concept_config=ConceptConfig.from_dict(d["concept_config"]),
-            frozen_dataset_config=DatasetConfig.from_dict(d["frozen_dataset_config"]),
-            frozen_spacy_config=SpacyConfig.from_dict(d["frozen_spacy_config"]),
-            frozen_embedding_config=EmbeddingConfig.from_dict(d["frozen_embedding_config"]),
-            frozen_hyperparameters=HyperparametersConfig.from_dict(d["frozen_hyperparameters"]),
+            result_path=result_path,
+            config_snapshot=d.get("config_snapshot", {}),
+            name=d.get("name"),
             status=d.get("status", "pending"),
             error_message=d.get("error_message"),
         )
+        # Status recovery: running but no results file → interrupted
+        if result.status == "running":
+            results_pkl = result_path / "results.pkl"
+            if not results_pkl.exists():
+                result.status = "interrupted"
+        return result
+
+    def to_replication_script(self) -> str:
+        """Generate a standalone Python script to reproduce this run."""
+        s = self.config_snapshot
+        atype = s.get("analysis_type", "pls")
+
+        lines = [
+            "from ssdiff import SSD, Corpus, Embeddings",
+            "import pandas as pd",
+            "",
+            f'df = pd.read_csv("{s.get("csv_path", "data.csv")}", '
+            f'encoding="{s.get("csv_encoding", "utf-8-sig")}")',
+            f'corpus = Corpus.from_dataframe(df, text_column="{s.get("text_column", "text")}", '
+            f'language="{s.get("language", "en")}")',
+            f'emb = Embeddings.load("{s.get("selected_embedding", "embeddings.ssdembed")}")',
+            "",
+        ]
+
+        # Lexicon
+        lexicon = s.get("lexicon_tokens", [])
+        concept_mode = s.get("concept_mode", "lexicon")
+        use_full_doc = concept_mode != "lexicon"
+
+        if concept_mode == "lexicon":
+            lines.append(f"lexicon = {lexicon!r}")
+        else:
+            lines.append("lexicon = list(set(t for doc in corpus.docs for t in doc))")
+
+        # Outcome / groups
+        if atype in ("pls", "pca_ols"):
+            col = s.get("outcome_column", "outcome")
+            lines.append(f'y = df["{col}"]')
+        else:
+            col = s.get("group_column", "group")
+            lines.append(f'y = df["{col}"]')
+
+        lines.append("")
+        lines.append("ssd = SSD(")
+        lines.append("    embeddings=emb,")
+        lines.append("    corpus=corpus,")
+        lines.append("    y=y,")
+        lines.append("    lexicon=lexicon,")
+        lines.append(f"    window={s.get('context_window_size', 3)},")
+        lines.append(f"    sif_a={s.get('sif_a', 1e-3)},")
+        if use_full_doc:
+            lines.append("    use_full_doc=True,")
+        lines.append(")")
+        lines.append("")
+
+        # Fit call
+        if atype == "pls":
+            n_comp = s.get("pls_n_components", 1)
+            n_comp_str = f'"{n_comp}"' if n_comp == "auto" else str(n_comp)
+            p_method = s.get("pls_p_method", "auto")
+            p_method_str = f'"{p_method}"' if p_method else "None"
+            rs = s.get("pls_random_state", "default")
+            rs_val = DEFAULT_RANDOM_SEED if rs == "default" else int(rs)
+            lines.append("result = ssd.fit_pls(")
+            lines.append(f"    n_components={n_comp_str},")
+            pca_pre = s.get("pls_pca_preprocess")
+            if pca_pre is not None:
+                lines.append(f"    pca_preprocess={pca_pre},")
+            lines.append(f"    p_method={p_method_str},")
+            lines.append(f"    n_perm={s.get('pls_n_perm', 1000)},")
+            lines.append(f"    n_splits={s.get('pls_n_splits', 50)},")
+            lines.append(f"    split_ratio={s.get('pls_split_ratio', 0.5)},")
+            lines.append(f"    random_state={rs_val},")
+            lines.append(")")
+        elif atype == "pca_ols":
+            lines.append("result = ssd.fit_ols(")
+            n_comp = s.get("pcaols_n_components")
+            lines.append(f"    n_components={n_comp},")
+            lines.append(f"    k_min={s.get('sweep_k_min', 20)},")
+            lines.append(f"    k_max={s.get('sweep_k_max', 120)},")
+            lines.append(f"    k_step={s.get('sweep_k_step', 2)},")
+            lines.append(")")
+        elif atype == "groups":
+            rs = s.get("groups_random_state", "default")
+            rs_val = DEFAULT_RANDOM_SEED if rs == "default" else int(rs)
+            lines.append("result = ssd.fit_groups(")
+            lines.append(f"    median_split={s.get('groups_median_split', False)},")
+            lines.append(f"    n_perm={s.get('groups_n_perm', 5000)},")
+            lines.append(f'    correction="{s.get("groups_correction", "holm")}",')
+            lines.append(f"    random_state={rs_val},")
+            lines.append(")")
+
+        lines.append("")
+        lines.append("print(result.summary())")
+        lines.append("")
+        lines.append("# --- Or load saved results directly: ---")
+        lines.append("# import pickle")
+        lines.append('# with open("results.pkl", "rb") as f:')
+        lines.append("#     result = pickle.load(f)")
+        lines.append("# print(result.summary())")
+
+        return "\n".join(lines) + "\n"
+
+
+# Fields serialized to project.json (excludes runtime-only and run list)
+_SERIALIZED_FIELDS = [
+    "name", "created_date", "modified_date",
+    "csv_path", "csv_encoding", "text_column", "id_column", "n_rows", "n_valid",
+    "language", "spacy_model", "input_mode", "stopword_mode", "custom_stopwords",
+    "preprocessed_text_column", "n_docs_processed", "total_tokens",
+    "mean_words_before_stopwords",
+    "selected_embedding", "vocab_size", "embedding_dim", "l2_normalized", "abtt_m",
+    "emb_coverage_pct", "emb_n_oov",
+    "analysis_type", "concept_mode", "outcome_column", "group_column", "lexicon_tokens",
+    "min_hits_per_doc", "drop_no_hits", "fulldoc_stoplist",
+    "concept_coverage_pct", "concept_n_docs_with_hits",
+    "concept_median_hits", "concept_mean_hits",
+    "context_window_size", "sif_a",
+    "clustering_topn", "clustering_k_auto", "clustering_k_min",
+    "clustering_k_max", "clustering_top_words",
+    "pls_n_components", "pls_pca_preprocess", "pls_p_method",
+    "pls_n_perm", "pls_n_splits", "pls_split_ratio", "pls_random_state",
+    "pcaols_n_components", "sweep_k_min", "sweep_k_max", "sweep_k_step",
+    "groups_n_perm", "groups_correction", "groups_median_split", "groups_random_state",
+]
+
+# Fields included in the per-run config snapshot
+_SNAPSHOT_COMMON = [
+    "csv_path", "csv_encoding", "text_column", "id_column",
+    "outcome_column", "group_column",
+    "language", "spacy_model", "input_mode", "stopword_mode",
+    "analysis_type", "concept_mode", "lexicon_tokens",
+    "min_hits_per_doc", "drop_no_hits", "fulldoc_stoplist",
+    "context_window_size", "sif_a",
+    "selected_embedding", "l2_normalized", "abtt_m",
+    "clustering_topn", "clustering_k_auto", "clustering_k_min",
+    "clustering_k_max", "clustering_top_words",
+]
+_SNAPSHOT_PLS = [
+    "pls_n_components", "pls_pca_preprocess", "pls_p_method",
+    "pls_n_perm", "pls_n_splits", "pls_split_ratio", "pls_random_state",
+]
+_SNAPSHOT_PCA_OLS = [
+    "pcaols_n_components", "sweep_k_min", "sweep_k_max", "sweep_k_step",
+]
+_SNAPSHOT_GROUPS = [
+    "groups_n_perm", "groups_correction", "groups_median_split", "groups_random_state",
+]
 
 
 @dataclass
 class Project:
-    """Complete project state."""
+    """Complete project state — flat, no nested config objects."""
+
+    # -- Identity --
     project_path: Path
     name: str
     created_date: datetime
     modified_date: datetime
 
-    # Stage 1 configs
-    dataset_config: DatasetConfig = field(default_factory=DatasetConfig)
-    spacy_config: SpacyConfig = field(default_factory=SpacyConfig)
-    embedding_config: EmbeddingConfig = field(default_factory=EmbeddingConfig)
-    hyperparameters: HyperparametersConfig = field(default_factory=HyperparametersConfig)
+    # -- Dataset --
+    csv_path: Optional[Path] = None
+    csv_encoding: str = "utf-8-sig"
+    text_column: Optional[str] = None
+    id_column: Optional[str] = None
+    n_rows: int = 0
+    n_valid: int = 0
 
-    # Runs
-    runs: List[Run] = field(default_factory=list)
+    # -- Text Processing --
+    language: str = "en"
+    spacy_model: str = ""
+    input_mode: str = "language"          # "language" or "custom"
+    stopword_mode: str = "default"        # "default", "none", "custom"
+    custom_stopwords: List[str] = field(default_factory=list)
+    preprocessed_text_column: Optional[str] = None
+    n_docs_processed: int = 0
+    total_tokens: int = 0
+    mean_words_before_stopwords: float = 0.0
 
-    # State flags
-    stage1_complete: bool = False
-    ready_for_runs: bool = False
+    # -- Embeddings --
+    selected_embedding: Optional[str] = None
+    vocab_size: int = 0
+    embedding_dim: int = 0
+    l2_normalized: bool = False
+    abtt_m: int = 0
+    emb_coverage_pct: float = 0.0
+    emb_n_oov: int = 0
 
-    # Cached data (not serialized, loaded on demand)
-    _cached_df: Optional[Any] = field(default=None, repr=False)
-    _cached_pre_docs: Optional[List] = field(default=None, repr=False)
-    _cached_docs: Optional[List] = field(default=None, repr=False)
-    _cached_y: Optional[Any] = field(default=None, repr=False)
-    _cached_groups: Optional[Any] = field(default=None, repr=False)
-    _cached_kv: Optional[Any] = field(default=None, repr=False)
-    _cached_nlp: Optional[Any] = field(default=None, repr=False)
-    _cached_stopwords: Optional[List] = field(default=None, repr=False)
-    _cached_id_row_indices: Optional[List] = field(default=None, repr=False)
+    # -- Analysis --
+    analysis_type: str = "pls"            # "pls", "pca_ols", "groups"
+    concept_mode: str = "lexicon"         # "lexicon", "fulldoc"
+    outcome_column: Optional[str] = None
+    group_column: Optional[str] = None
+    lexicon_tokens: List[str] = field(default_factory=list)
+    min_hits_per_doc: Optional[int] = None
+    drop_no_hits: bool = True
+    fulldoc_stoplist: List[str] = field(default_factory=list)
 
-    def check_stage1_complete(self) -> bool:
-        """Check if Stage 1 is complete and ready to proceed."""
-        return (
-            self.dataset_config.cached
-            and self.spacy_config.processed
-            and self.embedding_config.loaded
-        )
+    # -- Concept stats (computed, not user-set) --
+    concept_coverage_pct: float = 0.0
+    concept_n_docs_with_hits: int = 0
+    concept_median_hits: float = 0.0
+    concept_mean_hits: float = 0.0
 
-    def update_ready_state(self):
-        """Update the ready_for_runs flag based on current state."""
-        self.stage1_complete = self.check_stage1_complete()
-        self.ready_for_runs = self.stage1_complete
+    # -- Hyperparameters: common --
+    context_window_size: int = 3
+    sif_a: float = 1e-3
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dict."""
-        return {
-            "name": self.name,
-            "created_date": self.created_date.isoformat(),
-            "modified_date": self.modified_date.isoformat(),
-            "dataset_config": self.dataset_config.to_dict(),
-            "spacy_config": self.spacy_config.to_dict(),
-            "embedding_config": self.embedding_config.to_dict(),
-            "hyperparameters": self.hyperparameters.to_dict(),
-            "runs": [run.run_id for run in self.runs],
-            "stage1_complete": self.stage1_complete,
-            "ready_for_runs": self.ready_for_runs,
-        }
+    # -- Hyperparameters: clustering --
+    clustering_topn: int = 100
+    clustering_k_auto: bool = True
+    clustering_k_min: int = 2
+    clustering_k_max: int = 10
+    clustering_top_words: int = 10
+
+    # -- Hyperparameters: PLS --
+    pls_n_components: int = 1
+    pls_pca_preprocess: Optional[int] = None
+    pls_p_method: str = "auto"
+    pls_n_perm: int = 1000
+    pls_n_splits: int = 50
+    pls_split_ratio: float = 0.5
+    pls_random_state: str = "default"
+
+    # -- Hyperparameters: PCA+OLS --
+    pcaols_n_components: Optional[int] = None
+    sweep_k_min: int = 20
+    sweep_k_max: int = 120
+    sweep_k_step: int = 2
+
+    # -- Hyperparameters: Groups --
+    groups_n_perm: int = 5000
+    groups_correction: str = "holm"
+    groups_median_split: bool = False
+    groups_random_state: str = "default"
+
+    # -- Results --
+    results: List[Result] = field(default_factory=list)
+
+    # -- Runtime only (not serialized) --
+    _dirty: bool = field(default=False, repr=False)
+    _df: Optional[Any] = field(default=None, repr=False)
+    _corpus: Optional[Any] = field(default=None, repr=False)
+    _emb: Optional[Any] = field(default=None, repr=False)
+    _kv: Optional[Any] = field(default=None, repr=False)
+    _nlp: Optional[Any] = field(default=None, repr=False)
+    _stopwords: Optional[List] = field(default=None, repr=False)
+    _pre_docs: Optional[List] = field(default=None, repr=False)
+    _docs: Optional[List] = field(default=None, repr=False)
+    _y: Optional[Any] = field(default=None, repr=False)
+    _groups: Optional[Any] = field(default=None, repr=False)
+    _id_row_indices: Optional[List] = field(default=None, repr=False)
+
+    # ------------------------------------------------------------------ #
+    #  Dirty tracking
+    # ------------------------------------------------------------------ #
+
+    def mark_dirty(self):
+        self._dirty = True
+
+    def mark_clean(self):
+        self._dirty = False
+
+    # ------------------------------------------------------------------ #
+    #  Computed readiness (no boolean flags)
+    # ------------------------------------------------------------------ #
+
+    @property
+    def text_ready(self) -> bool:
+        """Dataset loaded and text column selected."""
+        return self._df is not None and self.text_column is not None
+
+    @property
+    def preprocessing_ready(self) -> bool:
+        """Corpus in RAM matches current text column."""
+        return (self._corpus is not None
+                and self.preprocessed_text_column == self.text_column)
+
+    @property
+    def embeddings_ready(self) -> bool:
+        """Embeddings loaded into RAM."""
+        return self._emb is not None
+
+    @property
+    def stage1_ready(self) -> bool:
+        """All Stage 1 prerequisites satisfied."""
+        return self.text_ready and self.preprocessing_ready and self.embeddings_ready
+
+    # ------------------------------------------------------------------ #
+    #  Validation
+    # ------------------------------------------------------------------ #
+
+    def validate_text(self) -> Tuple[List[str], List[str], Optional[dict]]:
+        """Validate text column and optional ID column.
+
+        Returns (errors, warnings, id_stats).
+        """
+
+        errors: List[str] = []
+        warnings: List[str] = []
+        id_stats = None
+
+        if self._df is None:
+            errors.append("No dataset loaded")
+            return errors, warnings, id_stats
+
+        df = self._df
+        text_col = self.text_column
+
+        if not text_col or text_col not in df.columns:
+            errors.append(f"Text column '{text_col}' not found in dataset")
+            return errors, warnings, id_stats
+
+        # Empty texts
+        n_empty = df[text_col].isna().sum() + (df[text_col].astype(str).str.strip() == "").sum()
+        if n_empty > 0:
+            pct = n_empty / len(df) * 100
+            if pct > 50:
+                errors.append(f"{pct:.1f}% of texts are empty or missing")
+            elif pct > 10:
+                warnings.append(f"{pct:.1f}% of texts are empty or missing")
+
+        # Meaningful text (7+ chars)
+        meaningful = df[text_col].astype(str).str.strip().str.len() >= 7
+        n_meaningful = int(meaningful.sum())
+        n_total = len(df)
+
+        if n_meaningful < 30:
+            errors.append(
+                f"Only {n_meaningful} texts have 7+ characters"
+                " \u2014 not enough for SSD analysis"
+            )
+        else:
+            pct_meaningful = n_meaningful / n_total * 100
+            if pct_meaningful < 50:
+                warnings.append(
+                    f"Only {pct_meaningful:.0f}% of texts have 7+ characters"
+                    " \u2014 results may be unreliable"
+                )
+
+        # Sample size
+        if n_total < 30:
+            errors.append(f"Only {n_total} rows (need at least 30)")
+        elif n_total < 100:
+            warnings.append(f"Small sample size ({n_total} documents)")
+
+        # ID stats
+        id_col = self.id_column
+        if id_col and id_col in df.columns:
+            n_unique = df[id_col].nunique(dropna=True)
+            has_duplicates = n_unique < (~df[id_col].isna()).sum()
+            avg_texts = len(df) / n_unique if n_unique > 0 else 0.0
+            id_stats = {
+                "n_unique_ids": n_unique,
+                "has_duplicates": has_duplicates,
+                "avg_texts_per_id": avg_texts,
+            }
+
+        return errors, warnings, id_stats
+
+    def validate_outcome(self) -> Tuple[List[str], List[str]]:
+        """Validate outcome/group column before a run.
+
+        For pls/pca_ols: numeric, >50% valid, sufficient variance, >=30 samples.
+        For groups: 2+ groups with >=10 members each.
+        """
+        import pandas as pd
+
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        if self._df is None:
+            errors.append("No dataset loaded")
+            return errors, warnings
+
+        df = self._df
+
+        if self.analysis_type in ("pls", "pca_ols"):
+            col = self.outcome_column
+            if not col or col not in df.columns:
+                errors.append(f"Outcome column '{col}' not found in dataset")
+                return errors, warnings
+
+            outcome = pd.to_numeric(df[col], errors="coerce")
+            n_invalid = outcome.isna().sum()
+            n_original_na = df[col].isna().sum()
+            n_non_numeric = n_invalid - n_original_na
+
+            if n_non_numeric > 0:
+                pct = n_non_numeric / len(df) * 100
+                if pct > 50:
+                    errors.append(f"{pct:.1f}% of outcome values are non-numeric")
+                else:
+                    warnings.append(f"{n_non_numeric} outcome values are non-numeric")
+
+            valid_outcome = outcome.dropna()
+            if len(valid_outcome) > 0:
+                outcome_std = valid_outcome.std()
+                if outcome_std < 0.01:
+                    errors.append("Outcome has near-zero variance")
+                elif outcome_std < 0.1:
+                    warnings.append("Outcome has low variance")
+
+            n_valid = len(valid_outcome)
+            if n_valid < 30:
+                errors.append(f"Only {n_valid} valid samples (need at least 30)")
+            elif n_valid < 100:
+                warnings.append(f"Small sample size ({n_valid} documents)")
+
+        elif self.analysis_type == "groups":
+            col = self.group_column
+            if not col or col not in df.columns:
+                errors.append(f"Group column '{col}' not found in dataset")
+                return errors, warnings
+
+            groups = df[col].dropna()
+            counts = groups.value_counts()
+            if len(counts) < 2:
+                errors.append("Need at least 2 groups")
+            else:
+                small = counts[counts < 10]
+                if len(small) > 0:
+                    labels = ", ".join(str(lbl) for lbl in small.index[:3])
+                    errors.append(f"Groups with <10 members: {labels}")
+
+        return errors, warnings
+
+    def validate_lexicon(self) -> Tuple[List[str], List[str]]:
+        """Validate lexicon tokens against loaded embedding vocab.
+
+        Requires self._emb and self._corpus to be loaded.
+        """
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        lexicon = set(self.lexicon_tokens) if self.lexicon_tokens else set()
+        if not lexicon:
+            errors.append("Lexicon is empty")
+            return errors, warnings
+
+        if self._kv is None:
+            errors.append("No embeddings loaded")
+            return errors, warnings
+
+        vocab = set(self._kv.key_to_index.keys()) if hasattr(self._kv, 'key_to_index') else set()
+
+        # OOV tokens
+        oov_tokens = lexicon - vocab
+        if oov_tokens == lexicon:
+            errors.append("None of the lexicon tokens are in the embedding vocabulary")
+        elif len(oov_tokens) > 0:
+            pct = len(oov_tokens) / len(lexicon) * 100
+            if pct > 50:
+                warnings.append(f"{pct:.1f}% of lexicon tokens not in vocabulary: {list(oov_tokens)[:5]}...")
+            else:
+                warnings.append(f"{len(oov_tokens)} tokens not in vocabulary: {list(oov_tokens)[:5]}")
+
+        # Coverage
+        valid_tokens = lexicon & vocab
+        if valid_tokens and self._docs:
+            n_docs_with_hit = sum(1 for doc in self._docs if any(t in valid_tokens for t in doc))
+            coverage = n_docs_with_hit / len(self._docs) * 100 if self._docs else 0
+            if coverage < 10:
+                errors.append(f"Very low coverage: only {coverage:.1f}% of documents contain lexicon terms")
+            elif coverage < 30:
+                warnings.append(f"Low coverage: {coverage:.1f}% of documents contain lexicon terms")
+
+        # Lexicon size
+        if len(valid_tokens) < 3:
+            warnings.append(f"Very small lexicon ({len(valid_tokens)} tokens)")
+        elif len(valid_tokens) < 5:
+            warnings.append(f"Small lexicon ({len(valid_tokens)} tokens)")
+
+        return errors, warnings
+
+    # ------------------------------------------------------------------ #
+    #  Config snapshot (for Result)
+    # ------------------------------------------------------------------ #
+
+    def snapshot_config(self) -> dict:
+        """Flat dict of all config fields needed to reproduce a run."""
+        snap = {}
+        for key in _SNAPSHOT_COMMON:
+            val = getattr(self, key)
+            if isinstance(val, Path):
+                val = str(val)
+            elif isinstance(val, list):
+                val = list(val)
+            snap[key] = val
+
+        if self.analysis_type == "pls":
+            for key in _SNAPSHOT_PLS:
+                snap[key] = getattr(self, key)
+        elif self.analysis_type == "pca_ols":
+            for key in _SNAPSHOT_PCA_OLS:
+                snap[key] = getattr(self, key)
+        elif self.analysis_type == "groups":
+            for key in _SNAPSHOT_GROUPS:
+                snap[key] = getattr(self, key)
+
+        return snap
+
+    # ------------------------------------------------------------------ #
+    #  Serialization
+    # ------------------------------------------------------------------ #
+
+    def to_dict(self) -> dict:
+        """Serialize to JSON-friendly dict."""
+        d = {}
+        for key in _SERIALIZED_FIELDS:
+            val = getattr(self, key)
+            if isinstance(val, Path):
+                val = str(val)
+            elif isinstance(val, datetime):
+                val = val.isoformat()
+            d[key] = val
+        d["results"] = [r.result_id for r in self.results]
+        if self._id_row_indices is not None:
+            d["id_row_indices"] = self._id_row_indices
+        return d
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any], project_path: Path) -> "Project":
-        """Create from dict."""
-        return cls(
+    def from_dict(cls, d: dict, project_path: Path) -> "Project":
+        """Reconstruct Project from saved dict."""
+        proj = cls(
             project_path=project_path,
             name=d["name"],
             created_date=datetime.fromisoformat(d["created_date"]),
             modified_date=datetime.fromisoformat(d["modified_date"]),
-            dataset_config=DatasetConfig.from_dict(d["dataset_config"]),
-            spacy_config=SpacyConfig.from_dict(d["spacy_config"]),
-            embedding_config=EmbeddingConfig.from_dict(d["embedding_config"]),
-            hyperparameters=HyperparametersConfig.from_dict(d["hyperparameters"]),
-            stage1_complete=d.get("stage1_complete", False),
-            ready_for_runs=d.get("ready_for_runs", False),
         )
+        # Restore all serialized fields
+        for key in _SERIALIZED_FIELDS:
+            if key in ("name", "created_date", "modified_date"):
+                continue  # already set
+            if key not in d:
+                continue
+            val = d[key]
+            # Type coercions
+            if key == "csv_path" and val is not None:
+                val = Path(val)
+            setattr(proj, key, val)
+
+        # Restore id_row_indices
+        if "id_row_indices" in d:
+            proj._id_row_indices = d["id_row_indices"]
+
+        return proj
+

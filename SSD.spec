@@ -6,13 +6,19 @@ Build with:
     pyinstaller SSD.spec --clean --noconfirm
 
 Requires:
-    pip install spacy-pkuseg sudachipy sudachidict-core
+    (no extra pip installs needed)
 """
 
+import re
 import sys
 import glob
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_all, collect_data_files
+from PyInstaller.utils.hooks import collect_data_files
+
+# ── Version (single source of truth: pyproject.toml) ──
+_pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+_ver_match = re.search(r'^version\s*=\s*"([^"]+)"', _pyproject, re.MULTILINE)
+_version = _ver_match.group(1) if _ver_match else "0.0.0"
 
 block_cipher = None
 
@@ -41,17 +47,6 @@ if sys.platform == 'linux':
 # Collect data files for NLP packages that ship dictionaries/lookup tables
 nlp_datas = []
 nlp_datas += collect_data_files('spacy_lookups_data')
-nlp_datas += collect_data_files('jieba')
-nlp_datas += collect_data_files('sudachidict_core')
-
-# Collect full package (modules + native .so + data) for packages with Cython extensions
-nlp_binaries = []
-nlp_hiddenimports = []
-for _pkg in ['sudachipy', 'spacy_pkuseg']:
-    _d, _b, _h = collect_all(_pkg)
-    nlp_datas += _d
-    nlp_binaries += _b
-    nlp_hiddenimports += _h
 
 # Icon: .ico on Windows, .icns on macOS, None on Linux
 if sys.platform == 'win32':
@@ -70,23 +65,31 @@ if sys.platform == 'win32':
 a = Analysis(
     ['ssdiff_gui/main.py'],
     pathex=[str(SPEC_DIR)],
-    binaries=mkl_binaries + nlp_binaries,
+    binaries=mkl_binaries,
     datas=[
         # Include resources folder if it exists
         ('ssdiff_gui/resources', 'resources'),
     ] + nlp_datas,
     hiddenimports=[
-        # Core packages
+        # Core packages — ssdiff v1.0.0 module structure
         'ssdiff',
-        'ssdiff.core',
-        'ssdiff.preprocess',
-        'ssdiff.clusters',
-        'ssdiff.crossgroup',
-        'ssdiff.io_utils',
-        'ssdiff.lexicon',
-        'ssdiff.snippets',
-        'ssdiff.sweep',
+        'ssdiff.ssd',
+        'ssdiff.corpus',
+        'ssdiff.embeddings',
+        'ssdiff.results',
+        'ssdiff.lang_config',
+        'ssdiff.backends',
+        'ssdiff.backends.pls',
+        'ssdiff.backends.pca_sweep',
+        'ssdiff.backends._sweep_math',
+        'ssdiff.backends.group',
         'ssdiff.utils',
+        'ssdiff.utils.text',
+        'ssdiff.utils.vectors',
+        'ssdiff.utils.neighbors',
+        'ssdiff.utils.snippets',
+        'ssdiff.utils.lexicon',
+        'ssdiff.utils.math',
 
         # GUI
         'PySide6',
@@ -100,71 +103,24 @@ a = Analysis(
         'numpy',
         'numpy.core._methods',
         'numpy.linalg',
-        'scipy',
-        'scipy.sparse',
-        'scipy.spatial',
-        'scipy.linalg',
-        'scipy.stats',
-        'scipy.special',
-        'scipy.optimize',
-        'scipy._lib',
 
         # NLP
-        'gensim',
-        'gensim.models',
-        'gensim.models.keyedvectors',
         'spacy',
 
         # NLP lookup data
         'spacy_lookups_data',
 
-        # Asian language tokenizer backends
-        'spacy_pkuseg',       # Chinese (pkuseg)
-        'jieba',              # Chinese (jieba)
-        'jieba.analyse',
-        'jieba.finalseg',
-        'jieba.posseg',
-        'sudachipy',          # Japanese
-        'sudachidict_core',   # Japanese
 
-        # ML
-        'sklearn',
-        'sklearn.cluster',
-        'sklearn.decomposition',
-        'sklearn.metrics',
-        'sklearn.preprocessing',
-        'sklearn.utils',
-        'sklearn.utils._cython_blas',
-
-        # Export
-        'docx',
+        # Export (CSV via pandas + openpyxl for xlsx reading)
         'openpyxl',
         'openpyxl.cell',
         'openpyxl.styles',
         'openpyxl.utils',
         'et_xmlfile',
 
-        # Networking (used by ssdiff.preprocess for spaCy model downloads)
-        'requests',
-        'requests.adapters',
-        'requests.auth',
-        'requests.exceptions',
-        'certifi',
-        'charset_normalizer',
-        'idna',
-        'urllib3',
-        'urllib3.util',
-
         # Threading
         'concurrent.futures',
         'concurrent.futures.thread',
-
-        # Standard library that might be missed
-        'pickle',
-        'json',
-        'pathlib',
-        'datetime',
-        'dataclasses',
     ],
     hookspath=[],
     hooksconfig={},
@@ -178,7 +134,47 @@ a = Analysis(
         # Conflicting Qt bindings
         'PyQt5',
         'PyQt6',
-        # Heavy packages pulled in transitively
+        # Unused PySide6/Qt modules (app only needs QtCore, QtGui, QtWidgets, QtNetwork)
+        'PySide6.QtWebEngine',
+        'PySide6.QtWebEngineCore',
+        'PySide6.QtWebEngineWidgets',
+        'PySide6.QtWebChannel',
+        'PySide6.QtQuick',
+        'PySide6.QtQuick3D',
+        'PySide6.QtQuickWidgets',
+        'PySide6.QtQml',
+        'PySide6.Qt3DCore',
+        'PySide6.Qt3DRender',
+        'PySide6.Qt3DExtras',
+        'PySide6.QtOpenGL',
+        'PySide6.QtOpenGLWidgets',
+        'PySide6.QtMultimedia',
+        'PySide6.QtMultimediaWidgets',
+        'PySide6.QtDesigner',
+        'PySide6.QtCharts',
+        'PySide6.QtGraphs',
+        'PySide6.QtDataVisualization',
+        'PySide6.QtBluetooth',
+        'PySide6.QtLocation',
+        'PySide6.QtPositioning',
+        'PySide6.QtSensors',
+        'PySide6.QtSerialPort',
+        'PySide6.QtSql',
+        'PySide6.QtSvg',
+        'PySide6.QtSvgWidgets',
+        'PySide6.QtPdf',
+        'PySide6.QtPdfWidgets',
+        'PySide6.QtRemoteObjects',
+        'PySide6.QtShaderTools',
+        'PySide6.QtSpatialAudio',
+        'PySide6.QtNfc',
+        'PySide6.QtTest',
+        # Heavy packages from system Python or transitive deps
+        'scipy',
+        'matplotlib',
+        'PIL',
+        'Pillow',
+        'kiwisolver',
         'torch',
         'torchvision',
         'torchaudio',
@@ -200,6 +196,34 @@ a = Analysis(
     noarchive=False,
     **analysis_kwargs,
 )
+
+# ── Strip unused Qt shared libraries that hooks pull in anyway ──
+_qt_keep = {
+    'Core', 'Gui', 'Widgets', 'Network',
+    'DBus',         # QtWidgets runtime dep on Linux
+    'XcbQpa',       # X11 platform plugin
+    'WaylandClient', 'WlShellIntegration',  # Wayland support
+    'OpenGL',       # needed by QtGui on Linux
+    'Svg',          # icon rendering
+    'PrintSupport', # QWidget print dialogs
+    'Concurrent',   # used by some spaCy pipelines internally
+}
+
+def _is_unwanted_qt(name):
+    """Return True for Qt .so/.dll/.dylib files we don't need."""
+    basename = Path(name).name
+    # Match libQt6<Module>.so.6  /  Qt6<Module>.dll  /  Qt<Module>.abi3.so
+    for pat in (r'libQt6(\w+)\.so', r'Qt6(\w+)\.dll', r'Qt(\w+)\.abi3\.so'):
+        m = re.match(pat, basename)
+        if m and m.group(1) not in _qt_keep:
+            return True
+    # ICU / avcodec / avformat / avutil — only needed by WebEngine / Multimedia
+    if re.match(r'lib(icu|avcodec|avformat|avutil|swresample)', basename):
+        return True
+    return False
+
+a.binaries = [b for b in a.binaries if not _is_unwanted_qt(b[0])]
+a.datas    = [d for d in a.datas    if not _is_unwanted_qt(d[0])]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -243,7 +267,7 @@ if sys.platform == 'darwin':
         icon=app_icon,
         bundle_identifier='com.ssd.app',
         info_plist={
-            'CFBundleShortVersionString': '1.1.0',
+            'CFBundleShortVersionString': _version,
             'NSHighResolutionCapable': True,
         },
     )

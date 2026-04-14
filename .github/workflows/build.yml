@@ -1,6 +1,9 @@
 name: Build
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
 
 jobs:
@@ -10,7 +13,7 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact: SSD.exe
+            artifact: SSD-windows
             artifact_path: dist/SSD.exe
           - os: ubuntu-latest
             artifact: SSD-linux
@@ -27,14 +30,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
+          cache: pip
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-          pip install spacy-pkuseg sudachipy sudachidict-core
+          pip install . pyinstaller
 
       - name: Install ssdiff
         run: pip install ssdiff
@@ -78,3 +80,30 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist/SSD.app.zip
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir release
+          cp artifacts/SSD-windows/SSD.exe release/SSD-windows.exe
+          cp artifacts/SSD-linux/SSD release/SSD-linux
+          cp artifacts/SSD-macos/SSD.app.zip release/SSD-macos.app.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: release/*

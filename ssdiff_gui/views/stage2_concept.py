@@ -1,7 +1,7 @@
 """Stage 2: Run tab view for SSD.
 
-Contains a pre-flight review panel and (for lexicon mode) a lexicon builder.
-Analysis type, mode, and column selection are configured in the Setup tab.
+Contains model selection (analysis type + column), a pre-flight review
+panel, and (for lexicon mode) a lexicon builder.
 """
 
 from typing import Optional, Set
@@ -12,11 +12,17 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QFormLayout,
     QGroupBox,
     QLabel,
     QLineEdit,
     QPushButton,
-    QListWidget,
+    QComboBox,
+    QRadioButton,
+    QButtonGroup,
+    QSpinBox,
+    QDoubleSpinBox,
+    QCheckBox,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -26,54 +32,42 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QFrame,
 )
-from PySide6.QtCore import Qt, Signal, QSettings, QEvent, QTimer
+from PySide6.QtCore import Qt, Signal
 
-from ..models.project import Project, ConceptConfig
+from ..models.project import Project
+from ..utils.settings import app_settings
+from .widgets.collapsible_box import CollapsibleBox
 from .widgets.info_button import InfoButton
+from .widgets.overlay_info_mixin import OverlayInfoMixin
 
 
-class Stage2Widget(QWidget):
+class Stage2Widget(OverlayInfoMixin, QWidget):
     """Stage 2: Run - Pre-flight review + lexicon builder."""
 
-    run_requested = Signal(object)  # ConceptConfig
+    run_requested = Signal()
+
+    _info_margin_right = 4
+    _info_margin_top = 18
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.project: Optional[Project] = None
         self.lexicon: Set[str] = set()
-        self._settings = QSettings("SSD", "SSD")
+        self._settings = app_settings()
 
-        self._overlay_info_buttons: list = []
+        self._init_overlay_info()
         self._setup_ui()
 
-    # -- overlay info glyphs on QGroupBoxes ----------------------------
-
-    def _add_overlay_info(self, widget, tooltip_html: str):
-        """Pin an InfoButton to the top-right corner of *widget*."""
-        btn = InfoButton(tooltip_html, parent=widget)
-        widget.installEventFilter(self)
-        self._overlay_info_buttons.append((widget, btn))
-        QTimer.singleShot(0, lambda w=widget, b=btn: self._reposition_info(w, b))
-
     def eventFilter(self, obj, event):
-        if event.type() in (QEvent.Resize, QEvent.LayoutRequest):
-            for widget, btn in self._overlay_info_buttons:
-                if obj is widget:
-                    self._reposition_info(widget, btn)
-                    break
+        if self._overlay_info_event_filter(obj, event):
+            return True
         return super().eventFilter(obj, event)
-
-    @staticmethod
-    def _reposition_info(widget, btn):
-        x = widget.width() - btn.width() - 4
-        btn.move(x, 18)
-        btn.raise_()
 
     def _setup_ui(self):
         """Set up the user interface."""
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(24, 20, 24, 16)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(24, 12, 24, 8)
+        main_layout.setSpacing(6)
 
         # Header
         title = QLabel("Run Analysis")
@@ -86,7 +80,14 @@ class Stage2Widget(QWidget):
         subtitle.setObjectName("label_muted")
         main_layout.addWidget(subtitle)
 
-        # Main splitter: review panel (left) | lexicon builder (right)
+        # --- Model selection header ---
+        self._create_model_selection(main_layout)
+
+        # --- Advanced settings (collapsible) ---
+        self._create_advanced_settings(main_layout)
+        main_layout.addWidget(self.advanced_box)
+
+        # Main splitter: review (left) | current lexicon (middle) | suggestions (right)
         self.main_splitter = QSplitter(Qt.Horizontal)
 
         # --- Left: Pre-flight review panel ---
@@ -109,139 +110,784 @@ class Stage2Widget(QWidget):
         )
         self.main_splitter.addWidget(review_group)
 
-        # --- Right: Lexicon builder panel ---
-        self.lexicon_panel = QWidget()
-        self._create_lexicon_panel()
-        self.main_splitter.addWidget(self.lexicon_panel)
+        # --- Middle: Current Lexicon panel ---
+        self.lexicon_group = self._create_current_lexicon_panel()
+        self.main_splitter.addWidget(self.lexicon_group)
 
-        self.main_splitter.setSizes([400, 600])
+        # --- Right: Suggestions panel ---
+        self.suggestions_group = self._create_suggestions_panel()
+        self.main_splitter.addWidget(self.suggestions_group)
+
+        self.main_splitter.setSizes([350, 350, 300])
+        self.main_splitter.setMinimumHeight(200)
+
         main_layout.addWidget(self.main_splitter, stretch=1)
 
         # Bottom: Run section
-        self._create_run_section(main_layout)
+        self._create_run_section_widget(main_layout)
 
         # Restore splitter state
         self._restore_splitter_states()
 
-    def _create_lexicon_panel(self):
-        """Create the lexicon builder panel (right side)."""
-        layout = QVBoxLayout(self.lexicon_panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+    # ------------------------------------------------------------------ #
+    #  Model selection & advanced settings
+    # ------------------------------------------------------------------ #
 
-        self._add_overlay_info(self.lexicon_panel,
-            "<b>Lexicon Builder</b><br><br>"
-            "Build the word list that defines your concept.<br>"
-            "<b>Add Tokens</b> — type or paste seed words.<br>"
-            "<b>Current Lexicon</b> — your selected words; remove any "
-            "that don't fit.<br>"
-            "<b>Coverage</b> — see how many corpus sentences contain "
-            "at least one lexicon word.<br>"
-            "<b>Suggestions</b> — nearest-neighbour words from the "
-            "embedding space to help you expand the lexicon.",
+    def _create_model_selection(self, parent_layout):
+        """Create model selection: 3 toggle buttons + column picker + mode."""
+        model_frame = QFrame()
+        model_frame.setObjectName("model_selection_frame")
+        model_layout = QVBoxLayout(model_frame)
+        model_layout.setContentsMargins(0, 0, 0, 0)
+        model_layout.setSpacing(8)
+
+        # Row 1: Three analysis type buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        self.analysis_type_group = QButtonGroup()
+        self.analysis_type_group.setExclusive(True)
+
+        self.pls_btn = QPushButton("PLS")
+        self.pls_btn.setCheckable(True)
+        self.pls_btn.setChecked(True)
+        self.pls_btn.setObjectName("btn_model_select_active")
+        self.pls_btn.setMinimumHeight(36)
+        self.pls_btn.setCursor(Qt.PointingHandCursor)
+        self.analysis_type_group.addButton(self.pls_btn, 0)
+        btn_row.addWidget(self.pls_btn)
+
+        self.pcaols_btn = QPushButton("PCA+OLS")
+        self.pcaols_btn.setCheckable(True)
+        self.pcaols_btn.setObjectName("btn_model_select")
+        self.pcaols_btn.setMinimumHeight(36)
+        self.pcaols_btn.setCursor(Qt.PointingHandCursor)
+        self.analysis_type_group.addButton(self.pcaols_btn, 1)
+        btn_row.addWidget(self.pcaols_btn)
+
+        self.groups_btn = QPushButton("Groups")
+        self.groups_btn.setCheckable(True)
+        self.groups_btn.setObjectName("btn_model_select")
+        self.groups_btn.setMinimumHeight(36)
+        self.groups_btn.setCursor(Qt.PointingHandCursor)
+        self.analysis_type_group.addButton(self.groups_btn, 2)
+        btn_row.addWidget(self.groups_btn)
+
+        btn_row.addStretch(1)
+        model_layout.addLayout(btn_row)
+
+        # Row 2: Column picker + mode — stays the same for all types
+        config_row = QHBoxLayout()
+        config_row.setSpacing(12)
+
+        # Column label (changes between "Outcome Column" and "Group Column")
+        self.column_label = QLabel("Outcome Column:")
+        config_row.addWidget(self.column_label)
+
+        self.column_combo = QComboBox()
+        self.column_combo.setMinimumWidth(180)
+        self.column_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.column_combo.addItem("(none)")
+        self.column_combo.currentIndexChanged.connect(self._on_column_changed)
+        config_row.addWidget(self.column_combo)
+
+        self.column_summary_label = QLabel("")
+        self.column_summary_label.setObjectName("label_muted")
+        config_row.addWidget(self.column_summary_label, stretch=1)
+
+        # Mode selection
+        config_row.addSpacing(16)
+        config_row.addWidget(QLabel("Mode:"))
+
+        self.mode_btn_group = QButtonGroup()
+        self.lexicon_radio = QRadioButton("Lexicon")
+        self.lexicon_radio.setChecked(True)
+        self.mode_btn_group.addButton(self.lexicon_radio, 0)
+        config_row.addWidget(self.lexicon_radio)
+
+        self.fulldoc_radio = QRadioButton("Full Document")
+        self.mode_btn_group.addButton(self.fulldoc_radio, 1)
+        config_row.addWidget(self.fulldoc_radio)
+
+        model_layout.addLayout(config_row)
+
+        parent_layout.addWidget(model_frame)
+
+        # Connect signals
+        self.pls_btn.toggled.connect(self._on_analysis_type_changed)
+        self.pcaols_btn.toggled.connect(self._on_analysis_type_changed)
+        self.groups_btn.toggled.connect(self._on_analysis_type_changed)
+        self.lexicon_radio.toggled.connect(self._on_mode_changed)
+
+    def _create_advanced_settings(self, parent_layout):
+        """Create collapsible advanced settings section."""
+        self.advanced_box = CollapsibleBox("Advanced Settings")
+        content = self.advanced_box.content_layout
+
+        def _section_label(text: str) -> QLabel:
+            """Create a styled section header label."""
+            lbl = QLabel(text)
+            lbl.setStyleSheet(
+                "QLabel { color: rgba(255,255,255,0.45); font-size: 11px;"
+                " font-weight: bold; letter-spacing: 1px;"
+                " border-bottom: 1px solid rgba(255,255,255,0.12);"
+                " padding-bottom: 2px; margin-top: 6px; }"
+            )
+            return lbl
+
+        def _form_row(label, widget, info_html, form_layout):
+            """Add a form row: label | widget + info button. Returns the InfoButton."""
+            row = QHBoxLayout()
+            row.addWidget(widget, 1)
+            ib = InfoButton(info_html)
+            row.addWidget(ib)
+            form_layout.addRow(label, row)
+            return ib
+
+        # -- Text Processing section (common) --
+        content.addWidget(_section_label("TEXT PROCESSING"))
+        text_form = QFormLayout()
+        text_form.setContentsMargins(4, 2, 0, 0)
+        text_form.setHorizontalSpacing(12)
+        text_form.setVerticalSpacing(6)
+
+        self.window_size_spin = QSpinBox()
+        self.window_size_spin.setRange(1, 20)
+        self.window_size_spin.setValue(3)
+        self.window_size_label = QLabel("Context window (+/-):")
+        self._window_size_info = _form_row(
+            self.window_size_label, self.window_size_spin,
+            "Words before and after each target word included when<br>"
+            "computing sentence embeddings. Larger = more context, slower.",
+            text_form,
         )
 
-        self.lexicon_splitter = QSplitter(Qt.Horizontal)
+        self.sif_a_spin = QDoubleSpinBox()
+        self.sif_a_spin.setRange(1e-5, 1.0)
+        self.sif_a_spin.setDecimals(5)
+        self.sif_a_spin.setValue(1e-3)
+        self.sif_a_spin.setSingleStep(1e-4)
+        _form_row(
+            "SIF (a):", self.sif_a_spin,
+            "Smooth Inverse Frequency weight. Controls how much to<br>"
+            "down-weight common words. Smaller values penalize<br>"
+            "frequent words more heavily.",
+            text_form,
+        )
+        content.addLayout(text_form)
 
-        # Left: Token input and lexicon list
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        # -- PLS Settings section --
+        self.pls_section_label = _section_label("PLS")
+        content.addWidget(self.pls_section_label)
 
-        input_group = QGroupBox("Add Tokens")
-        input_layout = QVBoxLayout()
+        self.pls_frame = QFrame()
+        pls_form = QFormLayout(self.pls_frame)
+        pls_form.setContentsMargins(4, 2, 0, 0)
+        pls_form.setHorizontalSpacing(12)
+        pls_form.setVerticalSpacing(6)
 
-        token_row = QHBoxLayout()
+        self.pls_n_comp_spin = QSpinBox()
+        self.pls_n_comp_spin.setRange(0, 50)
+        self.pls_n_comp_spin.setValue(1)
+        self.pls_n_comp_spin.setSpecialValueText("auto")
+        _form_row(
+            "Components:", self.pls_n_comp_spin,
+            "Number of PLS components to extract.<br>"
+            "'auto' uses cross-validation to select the best number.",
+            pls_form,
+        )
+
+        self.pls_p_method_combo = QComboBox()
+        self.pls_p_method_combo.addItems(["auto", "perm", "split", "split_cal", "none"])
+        _form_row(
+            "p-method:", self.pls_p_method_combo,
+            "Statistical testing method.<br>"
+            "<b>perm</b> \u2014 permutation test<br>"
+            "<b>split</b> \u2014 formula-calibrated split-half<br>"
+            "<b>split_cal</b> \u2014 permutation-calibrated split-half<br>"
+            "<b>none</b> \u2014 skip testing",
+            pls_form,
+        )
+
+        self.pls_n_perm_label = QLabel("Permutations:")
+        self.pls_n_perm_spin = QSpinBox()
+        self.pls_n_perm_spin.setRange(100, 100000)
+        self.pls_n_perm_spin.setValue(1000)
+        self.pls_n_perm_spin.setSingleStep(100)
+        self._pls_perm_info = _form_row(
+            self.pls_n_perm_label, self.pls_n_perm_spin,
+            "Number of permutations for the permutation test.<br>"
+            "More = more precise p-values, slower.",
+            pls_form,
+        )
+
+        self.pls_n_splits_label = QLabel("Splits:")
+        self.pls_n_splits_spin = QSpinBox()
+        self.pls_n_splits_spin.setRange(10, 1000)
+        self.pls_n_splits_spin.setValue(50)
+        self._pls_splits_info = _form_row(
+            self.pls_n_splits_label, self.pls_n_splits_spin,
+            "Number of random splits for the split-half test.",
+            pls_form,
+        )
+
+        self.pls_split_ratio_label = QLabel("Split ratio:")
+        self.pls_split_ratio_spin = QDoubleSpinBox()
+        self.pls_split_ratio_spin.setRange(0.1, 0.9)
+        self.pls_split_ratio_spin.setValue(0.5)
+        self.pls_split_ratio_spin.setSingleStep(0.05)
+        self.pls_split_ratio_spin.setDecimals(2)
+        self._pls_ratio_info = _form_row(
+            self.pls_split_ratio_label, self.pls_split_ratio_spin,
+            "Proportion of data in the training half<br>"
+            "(0.5 = equal split).",
+            pls_form,
+        )
+
+        self.pls_random_state_combo = QComboBox()
+        self.pls_random_state_combo.setEditable(True)
+        self.pls_random_state_combo.addItem("default")
+        _form_row(
+            "Random state:", self.pls_random_state_combo,
+            "Seed for reproducibility. 'default' uses a fixed seed;<br>"
+            "enter a number for a custom seed.",
+            pls_form,
+        )
+
+        self.pls_frame.setVisible(True)
+        content.addWidget(self.pls_frame)
+
+        # Connect PLS p-method to show/hide perm/split params
+        self.pls_p_method_combo.currentTextChanged.connect(self._on_pls_p_method_changed)
+
+        # -- PCA+OLS section --
+        self.sweep_section_label = _section_label("PCA + OLS")
+        content.addWidget(self.sweep_section_label)
+        self.sweep_section_label.setVisible(False)
+
+        self.sweep_frame = QFrame()
+        sweep_form = QFormLayout(self.sweep_frame)
+        sweep_form.setContentsMargins(4, 2, 0, 0)
+        sweep_form.setHorizontalSpacing(12)
+        sweep_form.setVerticalSpacing(6)
+
+        # Fixed K option
+        fixed_k_row = QHBoxLayout()
+        self.fixed_k_check = QCheckBox("Use fixed K")
+        self.fixed_k_spin = QSpinBox()
+        self.fixed_k_spin.setRange(2, 1000)
+        self.fixed_k_spin.setValue(50)
+        self.fixed_k_spin.setEnabled(False)
+        fixed_k_row.addWidget(self.fixed_k_check)
+        fixed_k_row.addWidget(self.fixed_k_spin)
+        fixed_k_row.addWidget(InfoButton(
+            "When checked, use a fixed number of PCA components<br>"
+            "instead of sweeping a range to find the best K."
+        ))
+        fixed_k_row.addStretch()
+        sweep_form.addRow("PCA K:", fixed_k_row)
+        self.fixed_k_check.toggled.connect(self._on_fixed_k_toggled)
+
+        # Sweep range
+        sweep_range_row = QHBoxLayout()
+        self.k_min_spin = QSpinBox()
+        self.k_min_spin.setRange(2, 500)
+        self.k_min_spin.setValue(20)
+        sweep_range_row.addWidget(self.k_min_spin)
+        sweep_range_row.addWidget(QLabel("to"))
+        self.k_max_spin = QSpinBox()
+        self.k_max_spin.setRange(3, 1000)
+        self.k_max_spin.setValue(120)
+        sweep_range_row.addWidget(self.k_max_spin)
+        sweep_range_row.addWidget(QLabel("step"))
+        self.k_step_spin = QSpinBox()
+        self.k_step_spin.setRange(1, 50)
+        self.k_step_spin.setValue(2)
+        sweep_range_row.addWidget(self.k_step_spin)
+        sweep_range_row.addWidget(InfoButton(
+            "Range and step size for the number of clusters (K)<br>"
+            "to evaluate. The best K is selected by R² on the outcome."
+        ))
+        sweep_range_row.addStretch()
+        self.sweep_range_label = QLabel("K sweep:")
+        sweep_form.addRow(self.sweep_range_label, sweep_range_row)
+        # Keep references to sweep range widgets for enabling/disabling
+        self._sweep_range_widgets = [
+            self.k_min_spin, self.k_max_spin, self.k_step_spin,
+        ]
+
+        self.sweep_frame.setVisible(False)
+        content.addWidget(self.sweep_frame)
+
+        # -- Groups section --
+        self.groups_section_label = _section_label("GROUP COMPARISON")
+        content.addWidget(self.groups_section_label)
+        self.groups_section_label.setVisible(False)
+
+        self.groups_frame = QFrame()
+        groups_form = QFormLayout(self.groups_frame)
+        groups_form.setContentsMargins(4, 2, 0, 0)
+        groups_form.setHorizontalSpacing(12)
+        groups_form.setVerticalSpacing(6)
+
+        self.groups_n_perm_spin = QSpinBox()
+        self.groups_n_perm_spin.setRange(100, 100000)
+        self.groups_n_perm_spin.setValue(5000)
+        self.groups_n_perm_spin.setSingleStep(500)
+        _form_row(
+            "Permutations:", self.groups_n_perm_spin,
+            "Number of permutations for the group comparison test.<br>"
+            "More = more precise p-values.",
+            groups_form,
+        )
+
+        self.groups_correction_combo = QComboBox()
+        self.groups_correction_combo.addItems(["holm", "bonferroni", "fdr_bh"])
+        _form_row(
+            "Correction:", self.groups_correction_combo,
+            "Multiple comparison correction method.<br>"
+            "<b>holm</b> \u2014 recommended (less conservative than<br>"
+            "Bonferroni, more power than FDR).<br>"
+            "<b>bonferroni</b> \u2014 strict, controls family-wise error.<br>"
+            "<b>fdr_bh</b> \u2014 controls false discovery rate.",
+            groups_form,
+        )
+
+        self.groups_median_split_check = QCheckBox("Median split")
+        _form_row(
+            "", self.groups_median_split_check,
+            "Split a continuous outcome variable into two groups<br>"
+            "at the median, then run group comparison.",
+            groups_form,
+        )
+
+        self.groups_random_state_combo = QComboBox()
+        self.groups_random_state_combo.setEditable(True)
+        self.groups_random_state_combo.addItem("default")
+        _form_row(
+            "Random state:", self.groups_random_state_combo,
+            "Seed for reproducibility. 'default' uses a fixed seed;<br>"
+            "enter a number for a custom seed.",
+            groups_form,
+        )
+
+        self.groups_frame.setVisible(False)
+        content.addWidget(self.groups_frame)
+
+        # -- Clustering section (common) --
+        content.addWidget(_section_label("CLUSTERING"))
+        cluster_form = QFormLayout()
+        cluster_form.setContentsMargins(4, 2, 0, 0)
+        cluster_form.setHorizontalSpacing(12)
+        cluster_form.setVerticalSpacing(6)
+
+        self.cluster_topn_spin = QSpinBox()
+        self.cluster_topn_spin.setRange(20, 500)
+        self.cluster_topn_spin.setValue(100)
+        _form_row(
+            "Top-N words:", self.cluster_topn_spin,
+            "Number of nearest words to consider for each<br>"
+            "dimension when building word clusters.",
+            cluster_form,
+        )
+
+        k_row = QHBoxLayout()
+        self.cluster_k_auto_check = QCheckBox("Auto")
+        self.cluster_k_auto_check.setChecked(True)
+        k_row.addWidget(self.cluster_k_auto_check)
+        k_row.addSpacing(8)
+        k_row.addWidget(QLabel("range"))
+        self.cluster_k_min_spin = QSpinBox()
+        self.cluster_k_min_spin.setRange(2, 50)
+        self.cluster_k_min_spin.setValue(2)
+        k_row.addWidget(self.cluster_k_min_spin)
+        k_row.addWidget(QLabel("\u2013"))
+        self.cluster_k_max_spin = QSpinBox()
+        self.cluster_k_max_spin.setRange(3, 100)
+        self.cluster_k_max_spin.setValue(10)
+        k_row.addWidget(self.cluster_k_max_spin)
+        k_row.addWidget(InfoButton(
+            "Number of clusters. When Auto is checked, the optimal K<br>"
+            "is selected automatically within the given range."
+        ))
+        k_row.addStretch()
+        cluster_form.addRow("K:", k_row)
+
+        content.addLayout(cluster_form)
+
+    def _on_analysis_type_changed(self, checked: bool):
+        """Handle analysis type toggle button change."""
+        if not checked:
+            return
+        # Update button styles
+        for btn in [self.pls_btn, self.pcaols_btn, self.groups_btn]:
+            if btn.isChecked():
+                btn.setObjectName("btn_model_select_active")
+            else:
+                btn.setObjectName("btn_model_select")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+        is_groups = self.groups_btn.isChecked()
+        is_pls = self.pls_btn.isChecked()
+        is_pcaols = self.pcaols_btn.isChecked()
+        self.column_label.setText("Group Column:" if is_groups else "Outcome Column:")
+
+        # Show/hide analysis-type-specific settings (frame + section label)
+        self.pls_section_label.setVisible(is_pls)
+        self.pls_frame.setVisible(is_pls)
+        self.sweep_section_label.setVisible(is_pcaols)
+        self.sweep_frame.setVisible(is_pcaols)
+        self.groups_section_label.setVisible(is_groups)
+        self.groups_frame.setVisible(is_groups)
+
+        # Repopulate column combo for the new type
+        self._populate_column_combo()
+        self._on_column_changed()
+        self._update_run_button()
+
+    def _on_pls_p_method_changed(self, method: str):
+        """Show/hide PLS sub-params based on selected p-method."""
+        shows_perm = method in ("auto", "perm", "split_cal")
+        shows_split = method in ("auto", "split", "split_cal")
+        self.pls_n_perm_label.setVisible(shows_perm)
+        self.pls_n_perm_spin.setVisible(shows_perm)
+        self._pls_perm_info.setVisible(shows_perm)
+        self.pls_n_splits_label.setVisible(shows_split)
+        self.pls_n_splits_spin.setVisible(shows_split)
+        self._pls_splits_info.setVisible(shows_split)
+        self.pls_split_ratio_label.setVisible(shows_split)
+        self.pls_split_ratio_spin.setVisible(shows_split)
+        self._pls_ratio_info.setVisible(shows_split)
+
+    def _on_fixed_k_toggled(self, checked: bool):
+        """Enable/disable fixed K spin and sweep range widgets."""
+        self.fixed_k_spin.setEnabled(checked)
+        for w in self._sweep_range_widgets:
+            w.setEnabled(not checked)
+
+    def _on_mode_changed(self, lexicon_checked: bool):
+        """Handle mode toggle."""
+        if not self.project:
+            return
+        self.project.concept_mode = (
+            "lexicon" if self.lexicon_radio.isChecked() else "fulldoc"
+        )
+        is_lexicon = self.lexicon_radio.isChecked()
+        self.lexicon_group.setVisible(is_lexicon)
+        self.suggestions_group.setVisible(is_lexicon)
+        # Context window only relevant in lexicon mode
+        self.window_size_label.setVisible(is_lexicon)
+        self.window_size_spin.setVisible(is_lexicon)
+        self._window_size_info.setVisible(is_lexicon)
+        self._update_suggestions_btn_state()
+        self._update_run_button()
+
+    def _get_analysis_type(self) -> str:
+        if self.pls_btn.isChecked():
+            return "pls"
+        elif self.pcaols_btn.isChecked():
+            return "pca_ols"
+        else:
+            return "groups"
+
+    def _populate_column_combo(self):
+        """Populate column combo based on current analysis type and dataframe."""
+        self.column_combo.blockSignals(True)
+        old_text = self.column_combo.currentText()
+        self.column_combo.clear()
+        self.column_combo.addItem("(none)")
+
+        if self.project and self.project._df is not None:
+            df = self.project._df
+            if self.groups_btn.isChecked():
+                # All columns for groups
+                self.column_combo.addItems(df.columns.tolist())
+            else:
+                # Only numeric columns for PLS/PCA+OLS
+                numeric_cols = df.select_dtypes(include="number").columns.tolist()
+                self.column_combo.addItems(numeric_cols)
+
+        # Try to restore previous selection
+        idx = self.column_combo.findText(old_text)
+        if idx >= 0:
+            self.column_combo.setCurrentIndex(idx)
+        else:
+            self.column_combo.setCurrentIndex(0)
+        self.column_combo.blockSignals(False)
+
+    def _on_column_changed(self):
+        """Handle column selection change — compute y or groups."""
+        if not self.project or self.project._df is None:
+            self.column_summary_label.setText("")
+            self._update_suggestions_btn_state()
+            self._update_run_button()
+            return
+
+        col = self.column_combo.currentText()
+        if not col or col == "(none)":
+            self.column_summary_label.setText("")
+            self.project._y = None
+            self.project._groups = None
+            self._update_suggestions_btn_state()
+            self._update_run_button()
+            return
+
+        df = self.project._df
+        if col not in df.columns:
+            self.column_summary_label.setText("")
+            self._update_suggestions_btn_state()
+            self._update_run_button()
+            return
+
+        if self.groups_btn.isChecked():
+            self._compute_groups(col)
+        else:
+            self._compute_outcome(col)
+        self._update_suggestions_btn_state()
+        self._update_run_button()
+
+    def _compute_outcome(self, col: str):
+        """Compute outcome variable (y) from selected column."""
+        df = self.project._df
+        outcome = pd.to_numeric(df[col], errors="coerce")
+        id_row_indices = self.project._id_row_indices
+
+        if id_row_indices is not None:
+            y_list = []
+            for row_indices in id_row_indices:
+                vals = outcome.iloc[row_indices].dropna()
+                y_list.append(vals.iloc[0] if len(vals) > 0 else np.nan)
+            y_series = pd.Series(y_list)
+            n_valid = (~y_series.isna()).sum()
+            y = y_series.dropna().to_numpy()
+        else:
+            n_valid = (~outcome.isna()).sum()
+            y = outcome.dropna().to_numpy()
+
+        if n_valid > 0:
+            self.column_summary_label.setText(
+                f"n={n_valid:,}, mean={y.mean():.3f}, std={y.std():.3f}"
+            )
+            self.project._y = y
+            self.project._groups = None
+            self.project.outcome_column = col
+            self.project.n_valid = int(n_valid)
+            self._apply_outcome_filter(col)
+        else:
+            self.column_summary_label.setText("No valid numeric values")
+            self.project._y = None
+
+    def _apply_outcome_filter(self, col: str):
+        """Filter cached docs to match rows/profiles with valid outcome."""
+        corpus = self.project._corpus
+        if corpus is None:
+            from ..utils.file_io import ProjectIO
+            corpus = ProjectIO.load_corpus(self.project)
+        if corpus is None or not corpus.docs:
+            return
+        all_pre_docs, all_docs = corpus.pre_docs, corpus.docs
+        id_row_indices = self.project._id_row_indices
+        outcome = pd.to_numeric(self.project._df[col], errors="coerce")
+
+        if id_row_indices is not None:
+            per_id_mask = [
+                any(not np.isnan(outcome.iloc[ri]) for ri in row_indices)
+                for row_indices in id_row_indices
+            ]
+            self.project._docs = [all_docs[i] for i, ok in enumerate(per_id_mask) if ok]
+            self.project._pre_docs = [all_pre_docs[i] for i, ok in enumerate(per_id_mask) if ok]
+        else:
+            mask = ~outcome.isna()
+            self.project._docs = [all_docs[i] for i in range(len(all_docs)) if mask.iat[i]]
+            self.project._pre_docs = [all_pre_docs[i] for i in range(len(all_pre_docs)) if mask.iat[i]]
+
+    def _compute_groups(self, col: str):
+        """Compute group variable from selected column."""
+        df = self.project._df
+        id_row_indices = self.project._id_row_indices
+
+        if id_row_indices is not None:
+            per_id_groups = []
+            for row_indices in id_row_indices:
+                vals = df[col].iloc[row_indices].dropna()
+                vals = vals[vals.astype(str).str.strip() != ""]
+                per_id_groups.append(str(vals.iloc[0]) if len(vals) > 0 else "")
+            groups = pd.Series(per_id_groups)
+        else:
+            groups = df[col].copy()
+
+        n_missing = groups.isna().sum() + (groups.astype(str).str.strip() == "").sum()
+        groups_clean = groups.dropna()
+        groups_clean = groups_clean[groups_clean.astype(str).str.strip() != ""]
+        unique = groups_clean.astype(str).unique()
+        n_groups = len(unique)
+
+        counts_str = ", ".join(
+            f"{g}: {(groups_clean.astype(str) == g).sum()}"
+            for g in sorted(unique)
+        )
+        summary = f"{n_groups} groups, n={len(groups_clean):,}"
+        if n_missing > 0:
+            summary += f" ({n_missing} dropped)"
+        if n_groups <= 6:
+            summary += f"  [{counts_str}]"
+        self.column_summary_label.setText(summary)
+
+        self.project._groups = groups.to_numpy()
+        self.project._y = None
+        self.project.group_column = col
+        self._apply_group_filter(col)
+
+    def _apply_group_filter(self, col: str):
+        """Filter cached docs/profiles to match rows with valid groups."""
+        corpus = self.project._corpus
+        if corpus is None:
+            from ..utils.file_io import ProjectIO
+            corpus = ProjectIO.load_corpus(self.project)
+        if corpus is None or not corpus.docs:
+            return
+        all_pre_docs, all_docs = corpus.pre_docs, corpus.docs
+        id_row_indices = self.project._id_row_indices
+        df = self.project._df
+
+        if id_row_indices is not None:
+            per_id_valid = []
+            per_id_group_vals = []
+            for row_indices in id_row_indices:
+                vals = df[col].iloc[row_indices].dropna()
+                vals = vals[vals.astype(str).str.strip() != ""]
+                if len(vals) > 0:
+                    per_id_valid.append(True)
+                    per_id_group_vals.append(str(vals.iloc[0]))
+                else:
+                    per_id_valid.append(False)
+                    per_id_group_vals.append("")
+            self.project._docs = [all_docs[i] for i, ok in enumerate(per_id_valid) if ok]
+            self.project._pre_docs = [all_pre_docs[i] for i, ok in enumerate(per_id_valid) if ok]
+            self.project._groups = np.array([g for g, ok in zip(per_id_group_vals, per_id_valid) if ok])
+        else:
+            groups = df[col]
+            mask = ~(groups.isna() | (groups.astype(str).str.strip() == ""))
+            self.project._docs = [all_docs[i] for i in range(len(all_docs)) if mask.iat[i]]
+            self.project._pre_docs = [all_pre_docs[i] for i in range(len(all_pre_docs)) if mask.iat[i]]
+            self.project._groups = groups[mask].astype(str).to_numpy()
+        self.project._y = None
+
+    def _create_current_lexicon_panel(self) -> QGroupBox:
+        """Create the Current Lexicon panel (middle column)."""
+        group = QGroupBox("Current Lexicon")
+        layout = QVBoxLayout(group)
+        layout.setSpacing(4)
+
+        self._add_overlay_info(group,
+            "<b>Current Lexicon</b><br><br>"
+            "Your working lexicon — the word list that defines your concept.<br><br>"
+            "<b>Top bar</b> — type a keyword and press Enter/Add, or paste "
+            "a list of tokens.<br>"
+            "<b>Coverage stats</b> — how well the lexicon covers your "
+            "documents and its association with the outcome variable.<br>"
+            "<b>Token table</b> — each token with its frequency, association, "
+            "p-value, and effect direction. Select rows and Remove to refine.",
+        )
+
+        # -- Top bar: token input + Add + Paste --
+        top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(0, 0, 0, 0)
+
         self.token_input = QLineEdit()
         self.token_input.setPlaceholderText("Enter a keyword...")
         self.token_input.returnPressed.connect(self._add_token)
-        token_row.addWidget(self.token_input, stretch=1)
+        top_bar.addWidget(self.token_input, stretch=1)
 
         add_btn = QPushButton("Add")
         add_btn.setMinimumWidth(60)
         add_btn.clicked.connect(self._add_token)
-        token_row.addWidget(add_btn)
-
-        input_layout.addLayout(token_row)
+        top_bar.addWidget(add_btn)
 
         paste_btn = QPushButton("Paste Token List...")
         paste_btn.clicked.connect(self._paste_tokens)
-        input_layout.addWidget(paste_btn)
+        top_bar.addWidget(paste_btn)
 
-        input_group.setLayout(input_layout)
-        left_layout.addWidget(input_group)
+        layout.addLayout(top_bar)
 
-        list_group = QGroupBox("Current Lexicon")
-        list_layout = QVBoxLayout()
+        # -- Coverage stats --
+        self.coverage_stats = QLabel("Add tokens to see coverage statistics")
+        self.coverage_stats.setWordWrap(True)
+        layout.addWidget(self.coverage_stats)
 
-        self.lexicon_list = QListWidget()
-        self.lexicon_list.setSelectionMode(QListWidget.ExtendedSelection)
-        list_layout.addWidget(self.lexicon_list)
+        self.coverage_warnings = QLabel("")
+        self.coverage_warnings.setWordWrap(True)
+        layout.addWidget(self.coverage_warnings)
+
+        # -- Lexicon table --
+        self.lexicon_table = QTableWidget()
+        self.lexicon_table.setColumnCount(5)
+        self.lexicon_table.setHorizontalHeaderLabels([
+            "Token", "Freq", "Assoc", "p-value", "Direction",
+        ])
+        header = self.lexicon_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setMinimumSectionSize(40)
+        for col in range(1, 5):
+            header.setSectionResizeMode(col, QHeaderView.Fixed)
+        self.lexicon_table.setColumnWidth(1, 50)   # Freq
+        self.lexicon_table.setColumnWidth(2, 62)   # Assoc
+        self.lexicon_table.setColumnWidth(3, 62)   # p-value
+        self.lexicon_table.setColumnWidth(4, 68)   # Direction
+        self.lexicon_table.setAlternatingRowColors(True)
+        self.lexicon_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.lexicon_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.lexicon_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.lexicon_table.setSortingEnabled(True)
+        layout.addWidget(self.lexicon_table)
+
+        # -- Bottom: Remove + Clear + count --
+        bottom_bar = QHBoxLayout()
 
         remove_btn = QPushButton("Remove Selected")
         remove_btn.clicked.connect(self._remove_selected_tokens)
-        list_layout.addWidget(remove_btn)
+        bottom_bar.addWidget(remove_btn)
 
         clear_btn = QPushButton("Clear All")
         clear_btn.setObjectName("btn_secondary")
         clear_btn.clicked.connect(self._clear_lexicon)
-        list_layout.addWidget(clear_btn)
+        bottom_bar.addWidget(clear_btn)
+
+        bottom_bar.addStretch()
 
         self.lexicon_count_label = QLabel("0 tokens")
         self.lexicon_count_label.setObjectName("label_muted")
-        list_layout.addWidget(self.lexicon_count_label)
+        bottom_bar.addWidget(self.lexicon_count_label)
 
-        list_group.setLayout(list_layout)
-        left_layout.addWidget(list_group, stretch=1)
+        layout.addLayout(bottom_bar)
 
-        self.lexicon_splitter.addWidget(left_panel)
+        return group
 
-        # Right: Coverage and suggestions (vertical splitter)
-        self.coverage_splitter = QSplitter(Qt.Vertical)
+    def _create_suggestions_panel(self) -> QGroupBox:
+        """Create the Suggestions panel (right column)."""
+        group = QGroupBox("Lexicon Suggestions")
+        layout = QVBoxLayout(group)
 
-        coverage_group = QGroupBox("Lexicon Coverage")
-        coverage_layout = QVBoxLayout()
-
-        self.coverage_stats = QLabel("Add tokens to see coverage statistics")
-        self.coverage_stats.setWordWrap(True)
-        coverage_layout.addWidget(self.coverage_stats)
-
-        self.coverage_warnings = QLabel("")
-        self.coverage_warnings.setWordWrap(True)
-        coverage_layout.addWidget(self.coverage_warnings)
-
-        self.coverage_table = QTableWidget()
-        self.coverage_table.setColumnCount(6)
-        self.coverage_table.setHorizontalHeaderLabels([
-            "Word", "Docs", "Cov%", "Q1%", "Q4%", "Corr",
-        ])
-        self.coverage_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.Stretch
+        self._add_overlay_info(group,
+            "<b>Lexicon Suggestions</b><br><br>"
+            "Words suggested based on statistical association with your "
+            "outcome variable.<br><br>"
+            "Double-click a row to add it to your lexicon.<br>"
+            "Click <b>Get Suggestions</b> to refresh after changing "
+            "your lexicon.",
         )
-        for col in range(1, 6):
-            self.coverage_table.horizontalHeader().setSectionResizeMode(
-                col, QHeaderView.ResizeToContents
-            )
-        self.coverage_table.setAlternatingRowColors(True)
-        self.coverage_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        coverage_layout.addWidget(self.coverage_table)
-
-        coverage_group.setLayout(coverage_layout)
-        self.coverage_splitter.addWidget(coverage_group)
-
-        suggestions_group = QGroupBox("Lexicon Suggestions")
-        suggestions_layout = QVBoxLayout()
 
         suggestions_desc = QLabel(
             "Double-click a row to add it to your lexicon."
         )
         suggestions_desc.setObjectName("label_muted")
-        suggestions_layout.addWidget(suggestions_desc)
+        layout.addWidget(suggestions_desc)
 
         self.suggestions_table = QTableWidget()
         self.suggestions_table.setColumnCount(5)
         self.suggestions_table.setHorizontalHeaderLabels([
-            "Token", "Docs", "Cov%", "Corr", "Rank",
+            "Token", "Freq", "Assoc", "p-value", "Direction",
         ])
         self.suggestions_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.Stretch
@@ -254,25 +900,21 @@ class Stage2Widget(QWidget):
         self.suggestions_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.suggestions_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.suggestions_table.cellDoubleClicked.connect(self._add_suggestion)
-        suggestions_layout.addWidget(self.suggestions_table)
+        layout.addWidget(self.suggestions_table)
 
-        refresh_suggestions_btn = QPushButton("Get Suggestions")
-        refresh_suggestions_btn.clicked.connect(self._update_suggestions)
-        suggestions_layout.addWidget(refresh_suggestions_btn)
+        self.refresh_suggestions_btn = QPushButton("Get Suggestions")
+        self.refresh_suggestions_btn.setEnabled(False)
+        self.refresh_suggestions_btn.setToolTip(
+            "Select an outcome or group column first"
+        )
+        self.refresh_suggestions_btn.clicked.connect(self._update_suggestions)
+        layout.addWidget(self.refresh_suggestions_btn)
 
-        suggestions_group.setLayout(suggestions_layout)
-        self.coverage_splitter.addWidget(suggestions_group)
+        return group
 
-        self.coverage_splitter.setSizes([300, 300])
-        self.lexicon_splitter.addWidget(self.coverage_splitter)
-
-        self.lexicon_splitter.setSizes([300, 500])
-
-        layout.addWidget(self.lexicon_splitter)
-
-    def _create_run_section(self, parent_layout):
-        """Create the run analysis section."""
-        bottom_splitter = QSplitter(Qt.Horizontal)
+    def _create_run_section_widget(self, parent_layout):
+        """Create the run analysis section and add it to the parent layout."""
+        self.bottom_splitter = QSplitter(Qt.Horizontal)
 
         self.checks_frame = QFrame()
         self.checks_frame.setObjectName("frame_ready_pending")
@@ -289,7 +931,7 @@ class Stage2Widget(QWidget):
         checks_layout.addWidget(self.sanity_checks_label)
 
         self.checks_frame.setLayout(checks_layout)
-        bottom_splitter.addWidget(self.checks_frame)
+        self.bottom_splitter.addWidget(self.checks_frame)
 
         nav_widget = QWidget()
         nav_layout = QVBoxLayout(nav_widget)
@@ -322,10 +964,10 @@ class Stage2Widget(QWidget):
 
         nav_layout.addLayout(nav_buttons_layout)
 
-        bottom_splitter.addWidget(nav_widget)
-        bottom_splitter.setSizes([500, 300])
+        self.bottom_splitter.addWidget(nav_widget)
+        self.bottom_splitter.setSizes([500, 300])
 
-        parent_layout.addWidget(bottom_splitter)
+        parent_layout.addWidget(self.bottom_splitter)
 
     # ------------------------------------------------------------------ #
     #  Splitter persistence
@@ -333,30 +975,21 @@ class Stage2Widget(QWidget):
 
     def _save_splitter_states(self):
         """Save splitter sizes to QSettings."""
-        self._settings.setValue("run_tab/main_splitter", self.main_splitter.saveState())
-        self._settings.setValue("run_tab/lexicon_splitter", self.lexicon_splitter.saveState())
-        self._settings.setValue("run_tab/coverage_splitter", self.coverage_splitter.saveState())
+        self._settings.setValue("run_tab/main_splitter_3col", self.main_splitter.saveState())
+        self._settings.setValue("run_tab/bottom_splitter", self.bottom_splitter.saveState())
 
     def _restore_splitter_states(self):
         """Restore splitter sizes from QSettings."""
         try:
-            state = self._settings.value("run_tab/main_splitter")
+            state = self._settings.value("run_tab/main_splitter_3col")
             if state is not None:
                 self.main_splitter.restoreState(state)
         except Exception:
             pass
-
         try:
-            state = self._settings.value("run_tab/lexicon_splitter")
+            state = self._settings.value("run_tab/bottom_splitter")
             if state is not None:
-                self.lexicon_splitter.restoreState(state)
-        except Exception:
-            pass
-
-        try:
-            state = self._settings.value("run_tab/coverage_splitter")
-            if state is not None:
-                self.coverage_splitter.restoreState(state)
+                self.bottom_splitter.restoreState(state)
         except Exception:
             pass
 
@@ -381,14 +1014,10 @@ class Stage2Widget(QWidget):
             return "<p>No project loaded.</p>"
 
         pal = self._html_palette()
-        proj = self.project
-        dc = proj.dataset_config
-        sc = proj.spacy_config
-        ec = proj.embedding_config
-        hp = proj.hyperparameters
+        p = self.project
 
-        is_crossgroup = dc.analysis_type == "crossgroup"
-        is_lexicon = dc.concept_mode == "lexicon"
+        is_crossgroup = p.analysis_type == "groups"
+        is_lexicon = p.concept_mode == "lexicon"
 
         label_style = (
             f"color: {pal.text_secondary}; font-size: {pal.font_size_sm}; "
@@ -406,9 +1035,14 @@ class Stage2Widget(QWidget):
         # --- Analysis Type ---
         html.append(f'<div style="{section_style}">Analysis Type</div>')
         html.append('<table cellspacing="6" style="width: 100%;">')
+        type_label = {
+            "pls": "PLS (Continuous)",
+            "pca_ols": "PCA+OLS (Continuous)",
+            "groups": "Group Comparison",
+        }.get(p.analysis_type, p.analysis_type)
         html.append(
             f'<tr><td style="{label_style}">Type</td>'
-            f'<td style="{value_style}">{"Group Comparison" if is_crossgroup else "Continuous Outcome"}</td></tr>'
+            f'<td style="{value_style}">{type_label}</td></tr>'
         )
         html.append(
             f'<tr><td style="{label_style}">Mode</td>'
@@ -416,29 +1050,25 @@ class Stage2Widget(QWidget):
         )
 
         if is_crossgroup:
-            col = dc.group_column or "(not set)"
+            col = p.group_column or "(not set)"
             html.append(
                 f'<tr><td style="{label_style}">Group Column</td>'
                 f'<td style="{value_style}">{col}</td></tr>'
             )
-            if proj._cached_groups is not None and len(proj._cached_groups) > 0:
-                unique = np.unique(proj._cached_groups)
+            if p._groups is not None and len(p._groups) > 0:
+                unique = np.unique(p._groups)
                 html.append(
                     f'<tr><td style="{label_style}">Groups</td>'
-                    f'<td style="{value_style}">{len(unique)} groups, n={len(proj._cached_groups):,}</td></tr>'
+                    f'<td style="{value_style}">{len(unique)} groups, n={len(p._groups):,}</td></tr>'
                 )
-            html.append(
-                f'<tr><td style="{label_style}">Permutations</td>'
-                f'<td style="{value_style}">{dc.n_perm:,}</td></tr>'
-            )
         else:
-            col = dc.outcome_column or "(not set)"
+            col = p.outcome_column or "(not set)"
             html.append(
                 f'<tr><td style="{label_style}">Outcome Column</td>'
                 f'<td style="{value_style}">{col}</td></tr>'
             )
-            if proj._cached_y is not None:
-                y = proj._cached_y
+            if p._y is not None:
+                y = p._y
                 html.append(
                     f'<tr><td style="{label_style}">Samples</td>'
                     f'<td style="{value_style}">n={len(y):,}, '
@@ -447,19 +1077,19 @@ class Stage2Widget(QWidget):
         html.append("</table>")
 
         # --- Dataset ---
-        n_docs = len(proj._cached_docs) if proj._cached_docs else 0
-        mean_words = sc.mean_words_before_stopwords
+        n_docs = len(p._docs) if p._docs else 0
+        mean_words = p.mean_words_before_stopwords
         html.append(f'<div style="{section_style}">Dataset</div>')
         html.append('<table cellspacing="6" style="width: 100%;">')
-        if dc.csv_path:
+        if p.csv_path:
             html.append(
                 f'<tr><td style="{label_style}">File</td>'
-                f'<td style="{value_style}; word-break: break-all;">{dc.csv_path.name}</td></tr>'
+                f'<td style="{value_style}; word-break: break-all;">{p.csv_path.name}</td></tr>'
             )
-        if dc.text_column:
+        if p.text_column:
             html.append(
                 f'<tr><td style="{label_style}">Text Column</td>'
-                f'<td style="{value_style}">{dc.text_column}</td></tr>'
+                f'<td style="{value_style}">{p.text_column}</td></tr>'
             )
         html.append(
             f'<tr><td style="{label_style}">Documents</td>'
@@ -475,54 +1105,63 @@ class Stage2Widget(QWidget):
         # --- Text Processing ---
         html.append(f'<div style="{section_style}">Text Processing (spaCy)</div>')
         html.append('<table cellspacing="6" style="width: 100%;">')
+        if p.input_mode == "custom" and p.spacy_model:
+            _display_model = p.spacy_model
+        else:
+            try:
+                from ssdiff.lang_config import lang_to_model
+                _display_model = lang_to_model(p.language)
+            except (ImportError, KeyError):
+                _display_model = f"{p.language}_core_news_lg"
         html.append(
             f'<tr><td style="{label_style}">Model</td>'
-            f'<td style="{value_style}">{sc.model}</td></tr>'
+            f'<td style="{value_style}">{_display_model}</td></tr>'
         )
         html.append(
             f'<tr><td style="{label_style}">Language</td>'
-            f'<td style="{value_style}">{sc.language}</td></tr>'
+            f'<td style="{value_style}">{p.language}</td></tr>'
         )
         html.append(
-            f'<tr><td style="{label_style}">Lemmatize</td>'
-            f'<td style="{value_style}">{"Yes" if sc.lemmatize else "No"}</td></tr>'
+            f'<tr><td style="{label_style}">Input Mode</td>'
+            f'<td style="{value_style}">{p.input_mode}</td></tr>'
         )
+        _sw_labels = {"default": "Default", "none": "Disabled", "custom": "Custom file"}
         html.append(
-            f'<tr><td style="{label_style}">Remove Stopwords</td>'
-            f'<td style="{value_style}">{"Yes" if sc.remove_stopwords else "No"}</td></tr>'
+            f'<tr><td style="{label_style}">Stopwords</td>'
+            f'<td style="{value_style}">{_sw_labels.get(p.stopword_mode, p.stopword_mode)}</td></tr>'
         )
         html.append("</table>")
 
         # --- Embeddings ---
         html.append(f'<div style="{section_style}">Embeddings</div>')
         html.append('<table cellspacing="6" style="width: 100%;">')
-        if ec.loaded:
+        if p.embeddings_ready:
             html.append(
                 f'<tr><td style="{label_style}">Vocabulary</td>'
-                f'<td style="{value_style}">{ec.vocab_size:,} words, {ec.embedding_dim}d</td></tr>'
+                f'<td style="{value_style}">{p.vocab_size:,} words, {p.embedding_dim}d</td></tr>'
             )
-            if ec.model_path:
+            if p.selected_embedding:
                 html.append(
                     f'<tr><td style="{label_style}">File</td>'
-                    f'<td style="{value_style}; word-break: break-all;">{ec.model_path.name}</td></tr>'
+                    f'<td style="{value_style}; word-break: break-all;">{p.selected_embedding}</td></tr>'
                 )
-            if ec.coverage_pct > 0:
-                cov_str = f"{ec.coverage_pct:.1f}%"
-                if ec.n_oov > 0:
-                    cov_str += f" ({ec.n_oov:,} OOV)"
+            if p.emb_coverage_pct > 0:
+                cov_str = f"{p.emb_coverage_pct:.1f}%"
+                if p.emb_n_oov > 0:
+                    cov_str += f" ({p.emb_n_oov:,} OOV)"
                 html.append(
                     f'<tr><td style="{label_style}">Coverage</td>'
                     f'<td style="{value_style}">{cov_str}</td></tr>'
                 )
             html.append(
-                f'<tr><td style="{label_style}">L2 Normalize</td>'
-                f'<td style="{value_style}">{"Yes" if ec.l2_normalize else "No"}</td></tr>'
+                f'<tr><td style="{label_style}">L2 Normalized</td>'
+                f'<td style="{value_style}">{"Yes" if p.l2_normalized else "No"}</td></tr>'
             )
-            html.append(
-                f'<tr><td style="{label_style}">ABTT</td>'
-                f'<td style="{value_style}">{"Yes" if ec.abtt_enabled else "No"}'
-                f'{f" (m={ec.abtt_m})" if ec.abtt_enabled else ""}</td></tr>'
-            )
+            if p.abtt_m > 0:
+                html.append(
+                    f'<tr><td style="{label_style}">ABTT</td>'
+                    f'<td style="{value_style}">m={p.abtt_m}</td></tr>'
+                )
         else:
             html.append(
                 f'<tr><td style="{label_style}">Status</td>'
@@ -536,55 +1175,21 @@ class Stage2Widget(QWidget):
         if is_lexicon:
             html.append(
                 f'<tr><td style="{label_style}">Context Window</td>'
-                f'<td style="{value_style}">\u00b1{hp.context_window_size}</td></tr>'
+                f'<td style="{value_style}">\u00b1{p.context_window_size}</td></tr>'
             )
         html.append(
             f'<tr><td style="{label_style}">SIF Parameter</td>'
-            f'<td style="{value_style}">{hp.sif_a:.5f}</td></tr>'
+            f'<td style="{value_style}">{p.sif_a:.5f}</td></tr>'
         )
-        if not is_crossgroup:
-            pca_mode = hp.n_pca_mode
-            if pca_mode == "auto":
-                html.append(
-                    f'<tr><td style="{label_style}">PCA</td>'
-                    f'<td style="{value_style}">Auto sweep ({hp.sweep_k_min}\u2013{hp.sweep_k_max}, '
-                    f'step {hp.sweep_k_step})</td></tr>'
-                )
-                html.append(
-                    f'<tr><td style="{label_style}">AUCK Radius</td>'
-                    f'<td style="{value_style}">{hp.auck_radius}</td></tr>'
-                )
-                html.append(
-                    f'<tr><td style="{label_style}">Beta Smoothing</td>'
-                    f'<td style="{value_style}">{hp.beta_smooth_kind}, '
-                    f'window={hp.beta_smooth_win}</td></tr>'
-                )
-                html.append(
-                    f'<tr><td style="{label_style}">Weight by Size</td>'
-                    f'<td style="{value_style}">{"Yes" if hp.weight_by_size else "No"}</td></tr>'
-                )
-            else:
-                html.append(
-                    f'<tr><td style="{label_style}">PCA</td>'
-                    f'<td style="{value_style}">K={hp.n_pca_manual}</td></tr>'
-                )
-            html.append(
-                f'<tr><td style="{label_style}">Unit Beta</td>'
-                f'<td style="{value_style}">{"Yes" if hp.use_unit_beta else "No"}</td></tr>'
-            )
-        html.append(
-            f'<tr><td style="{label_style}">L2 Normalize Docs</td>'
-            f'<td style="{value_style}">{"Yes" if hp.l2_normalize_docs else "No"}</td></tr>'
-        )
-        if hp.clustering_k_auto:
-            cluster_k_str = f"auto / silhouette ({hp.clustering_k_min}\u2013{hp.clustering_k_max})"
+        if p.clustering_k_auto:
+            cluster_k_str = f"auto / silhouette ({p.clustering_k_min}\u2013{p.clustering_k_max})"
         else:
-            cluster_k_str = f"{hp.clustering_k_min}\u2013{hp.clustering_k_max}"
+            cluster_k_str = f"{p.clustering_k_min}\u2013{p.clustering_k_max}"
         html.append(
             f'<tr><td style="{label_style}">Clustering</td>'
-            f'<td style="{value_style}">Top {hp.clustering_topn}, '
+            f'<td style="{value_style}">Top {p.clustering_topn}, '
             f'K={cluster_k_str}, '
-            f'{hp.clustering_top_words} top words'
+            f'{p.clustering_top_words} top words'
             f'</td></tr>'
         )
         html.append("</table>")
@@ -643,9 +1248,11 @@ class Stage2Widget(QWidget):
 
     def _remove_selected_tokens(self):
         """Remove selected tokens from lexicon."""
-        for item in self.lexicon_list.selectedItems():
-            token = item.text()
-            self.lexicon.discard(token)
+        selected_rows = set(idx.row() for idx in self.lexicon_table.selectedIndexes())
+        for row in selected_rows:
+            item = self.lexicon_table.item(row, 0)
+            if item:
+                self.lexicon.discard(item.text())
         self._update_lexicon_display()
         self._update_coverage()
 
@@ -671,10 +1278,16 @@ class Stage2Widget(QWidget):
             self._add_token_to_lexicon(item.text())
 
     def _update_lexicon_display(self):
-        """Update the lexicon list display."""
-        self.lexicon_list.clear()
-        for token in sorted(self.lexicon):
-            self.lexicon_list.addItem(token)
+        """Update the current lexicon table display."""
+        self.lexicon_table.setSortingEnabled(False)
+        self.lexicon_table.setRowCount(0)
+        tokens = sorted(self.lexicon)
+        self.lexicon_table.setRowCount(len(tokens))
+        for i, token in enumerate(tokens):
+            self.lexicon_table.setItem(i, 0, QTableWidgetItem(token))
+            for col in range(1, 5):
+                self.lexicon_table.setItem(i, col, QTableWidgetItem(""))
+        self.lexicon_table.setSortingEnabled(True)
         self.lexicon_count_label.setText(f"{len(self.lexicon)} tokens")
         self._update_run_button()
 
@@ -683,53 +1296,60 @@ class Stage2Widget(QWidget):
     # ------------------------------------------------------------------ #
 
     def _is_crossgroup(self) -> bool:
-        if not self.project:
-            return False
-        return self.project.dataset_config.analysis_type == "crossgroup"
+        return self.groups_btn.isChecked()
+
+    def _update_suggestions_btn_state(self):
+        """Enable/disable 'Get Suggestions' based on coverage data availability."""
+        docs, var, _ = self._get_coverage_data()
+        has_data = docs is not None and var is not None
+        self.refresh_suggestions_btn.setEnabled(has_data)
+        if has_data:
+            self.refresh_suggestions_btn.setToolTip("")
+        else:
+            self.refresh_suggestions_btn.setToolTip(
+                "Select an outcome or group column first"
+            )
 
     def _get_coverage_data(self):
         """Return (docs, var, var_type) for coverage functions."""
         if not self.project:
             return None, None, None
-        docs = self.project._cached_docs
+        docs = self.project._docs
         if not docs:
             return None, None, None
 
         if self._is_crossgroup():
-            groups = self.project._cached_groups
+            groups = self.project._groups
             if groups is None or len(groups) == 0:
                 return None, None, None
             return docs, groups, "categorical"
         else:
-            y = self.project._cached_y
+            y = self.project._y
             if y is None:
                 return None, None, None
             return docs, y, "continuous"
 
     def _update_coverage(self):
-        """Update coverage statistics using ssdiff's coverage_by_lexicon."""
+        """Update coverage statistics in the current lexicon table."""
         if not self.project or not self.lexicon:
             self.coverage_stats.setText("Add tokens to see coverage statistics")
             self.coverage_warnings.setText("")
-            self.coverage_table.setRowCount(0)
             self._update_run_button()
             return
 
         docs, var, var_type = self._get_coverage_data()
         if docs is None or var is None:
             self.coverage_stats.setText("Data not loaded or column not selected")
-            self.coverage_table.setRowCount(0)
             self._update_run_button()
             return
 
         try:
-            from ssdiff import coverage_by_lexicon
+            from ssdiff.utils.lexicon import coverage_by_lexicon
             summary, per_token = coverage_by_lexicon(
                 (docs, var), lexicon=self.lexicon, var_type=var_type
             )
         except Exception as e:
             self.coverage_stats.setText(f"Coverage computation failed: {e}")
-            self.coverage_table.setRowCount(0)
             self._update_run_button()
             return
 
@@ -746,9 +1366,7 @@ class Stage2Widget(QWidget):
                 f"Hits per doc \u2014 mean: {summary['hits_mean']:.2f}, "
                 f"median: {summary['hits_median']:.1f}"
             )
-            self.coverage_table.setHorizontalHeaderLabels([
-                "Word", "Docs", "Cov%", "Min Grp%", "Max Grp%", "Cram\u00e9r's V",
-            ])
+            assoc_header = "Assoc (V)"
         else:
             stats_text = (
                 f"Documents with any hit: {summary['docs_any']:,} / {n_docs:,} "
@@ -761,10 +1379,13 @@ class Stage2Widget(QWidget):
                 f"Types per doc \u2014 mean: {summary['types_mean']:.2f}, "
                 f"median: {summary['types_median']:.1f}"
             )
-            self.coverage_table.setHorizontalHeaderLabels([
-                "Word", "Docs", "Cov%", "Q1%", "Q4%", "Corr",
-            ])
+            assoc_header = "Assoc (r)"
         self.coverage_stats.setText(stats_text)
+
+        # Update the Assoc column header to reflect the analysis type
+        self.lexicon_table.setHorizontalHeaderLabels([
+            "Token", "Freq", assoc_header, "p-value", "Direction",
+        ])
 
         # Warnings
         warnings = []
@@ -772,11 +1393,11 @@ class Stage2Widget(QWidget):
             warnings.append("Small lexicon (< 5 tokens)")
         if cov_pct < 30:
             warnings.append(f"Low coverage ({cov_pct:.1f}%)")
-        zero_docs = per_token[per_token["docs"] == 0]
-        if len(zero_docs) > 0:
-            oov_words = ", ".join(zero_docs["word"].tolist()[:5])
+        zero_freq = [row for row in per_token if row.get("frequency", 0) == 0]
+        if zero_freq:
+            oov_words = ", ".join(row["token"] for row in zero_freq[:5])
             warnings.append(
-                f"{len(zero_docs)} token(s) with 0 docs: {oov_words}"
+                f"{len(zero_freq)} token(s) with 0 frequency: {oov_words}"
             )
 
         if warnings:
@@ -788,27 +1409,28 @@ class Stage2Widget(QWidget):
         self.coverage_warnings.style().unpolish(self.coverage_warnings)
         self.coverage_warnings.style().polish(self.coverage_warnings)
 
-        # Per-token table
-        self.coverage_table.setRowCount(len(per_token))
-        for i, (_, row) in enumerate(per_token.iterrows()):
-            self.coverage_table.setItem(
-                i, 0, QTableWidgetItem(str(row["word"]))
+        # Fill stats into the existing lexicon table rows
+        token_stats = {row.get("token", ""): row for row in per_token}
+        self.lexicon_table.setSortingEnabled(False)
+        for i in range(self.lexicon_table.rowCount()):
+            token_item = self.lexicon_table.item(i, 0)
+            if not token_item:
+                continue
+            token = token_item.text()
+            row = token_stats.get(token, {})
+            self.lexicon_table.setItem(
+                i, 1, QTableWidgetItem(str(row.get("frequency", 0)))
             )
-            self.coverage_table.setItem(
-                i, 1, QTableWidgetItem(str(row["docs"]))
+            self.lexicon_table.setItem(
+                i, 2, QTableWidgetItem(f"{row.get('association', 0):.4f}")
             )
-            self.coverage_table.setItem(
-                i, 2, QTableWidgetItem(f"{row['cov_all'] * 100:.1f}%")
+            self.lexicon_table.setItem(
+                i, 3, QTableWidgetItem(f"{row.get('pvalue', 1.0):.4g}")
             )
-            self.coverage_table.setItem(
-                i, 3, QTableWidgetItem(f"{row['q1'] * 100:.1f}%")
+            self.lexicon_table.setItem(
+                i, 4, QTableWidgetItem(str(row.get("effect_direction", "")))
             )
-            self.coverage_table.setItem(
-                i, 4, QTableWidgetItem(f"{row['q4'] * 100:.1f}%")
-            )
-            self.coverage_table.setItem(
-                i, 5, QTableWidgetItem(f"{row['corr']:.4f}")
-            )
+        self.lexicon_table.setSortingEnabled(True)
 
         self._update_run_button()
 
@@ -824,42 +1446,58 @@ class Stage2Widget(QWidget):
             return
 
         try:
-            from ssdiff import suggest_lexicon
-            df = suggest_lexicon((docs, var), var_type=var_type)
+            from ssdiff.utils.lexicon import suggest_lexicon, coverage_by_lexicon
+
+            # Get token suggestions (returns list[str])
+            suggested_tokens = suggest_lexicon(
+                (docs, var), var_type=var_type
+            )
+
+            # Filter out tokens already in the lexicon
+            suggested_tokens = [t for t in suggested_tokens if t not in self.lexicon][:50]
+
+            if not suggested_tokens:
+                return
+
+            # Get per-token stats by running coverage on suggested tokens
+            _, per_token_stats = coverage_by_lexicon(
+                (docs, var), lexicon=set(suggested_tokens), var_type=var_type
+            )
+            # Build a lookup by token
+            stats_by_word = {row["token"]: row for row in per_token_stats}
+
         except Exception as e:
             QMessageBox.warning(
                 self, "Error", f"suggest_lexicon failed: {e}"
             )
             return
 
-        # Filter out tokens already in the lexicon
-        df = df[~df["token"].isin(self.lexicon)].head(50)
-
         if var_type == "categorical":
             self.suggestions_table.setHorizontalHeaderLabels([
-                "Token", "Docs", "Cov%", "Cram\u00e9r's V", "Rank",
+                "Token", "Freq", "Assoc (V)", "p-value", "Direction",
             ])
         else:
             self.suggestions_table.setHorizontalHeaderLabels([
-                "Token", "Docs", "Cov%", "Corr", "Rank",
+                "Token", "Freq", "Assoc (r)", "p-value", "Direction",
             ])
 
-        self.suggestions_table.setRowCount(len(df))
-        for i, (_, row) in enumerate(df.iterrows()):
+        self.suggestions_table.setRowCount(len(suggested_tokens))
+        for i, token in enumerate(suggested_tokens):
+            row = stats_by_word.get(token, {})
             self.suggestions_table.setItem(
-                i, 0, QTableWidgetItem(str(row["token"]))
+                i, 0, QTableWidgetItem(token)
             )
             self.suggestions_table.setItem(
-                i, 1, QTableWidgetItem(str(row["docs"]))
+                i, 1, QTableWidgetItem(str(row.get("frequency", 0)))
             )
             self.suggestions_table.setItem(
-                i, 2, QTableWidgetItem(f"{row['cov_all'] * 100:.1f}%")
+                i, 2, QTableWidgetItem(f"{row.get('association', 0):.4f}")
             )
             self.suggestions_table.setItem(
-                i, 3, QTableWidgetItem(f"{row['corr']:.4f}")
+                i, 3, QTableWidgetItem(f"{row.get('pvalue', 1.0):.4g}")
             )
             self.suggestions_table.setItem(
-                i, 4, QTableWidgetItem(f"{row['rank']:.4f}")
+                i, 4, QTableWidgetItem(str(row.get("effect_direction", "")))
             )
 
     # ------------------------------------------------------------------ #
@@ -875,8 +1513,8 @@ class Stage2Widget(QWidget):
         checks = []
 
         # Data checks
-        if self.project._cached_docs:
-            n_docs = len(self.project._cached_docs)
+        if self.project._docs:
+            n_docs = len(self.project._docs)
             if n_docs >= 200:
                 checks.append(f"[OK] {n_docs:,} documents (sufficient)")
             elif n_docs >= 50:
@@ -888,8 +1526,8 @@ class Stage2Widget(QWidget):
 
         # Analysis-type-specific checks
         if self._is_crossgroup():
-            if self.project._cached_groups is not None and len(self.project._cached_groups) > 0:
-                unique = np.unique(self.project._cached_groups)
+            if self.project._groups is not None and len(self.project._groups) > 0:
+                unique = np.unique(self.project._groups)
                 n_groups = len(unique)
                 if n_groups >= 2:
                     checks.append(f"[OK] {n_groups} groups selected")
@@ -898,8 +1536,8 @@ class Stage2Widget(QWidget):
             else:
                 checks.append("[X] No group column selected")
         else:
-            if self.project._cached_y is not None:
-                y = self.project._cached_y
+            if self.project._y is not None:
+                y = self.project._y
                 y_std = np.std(y)
                 if y_std > 0.1:
                     checks.append(f"[OK] Outcome variance: {y_std:.3f}")
@@ -909,13 +1547,13 @@ class Stage2Widget(QWidget):
                 checks.append("[X] No outcome column selected")
 
         # Embeddings check
-        if self.project._cached_kv is not None:
+        if self.project._kv is not None:
             checks.append("[OK] Embeddings loaded")
         else:
             checks.append("[X] Embeddings not loaded")
 
         # Mode-specific checks
-        is_lexicon = self.project.dataset_config.concept_mode == "lexicon"
+        is_lexicon = self.project.concept_mode == "lexicon"
         if is_lexicon:
             if len(self.lexicon) >= 3:
                 checks.append(f"[OK] Lexicon: {len(self.lexicon)} tokens")
@@ -943,21 +1581,21 @@ class Stage2Widget(QWidget):
         """Update the run button enabled state."""
         can_run = False
 
-        if self.project and self.project._cached_docs:
-            has_embeddings = self.project._cached_kv is not None
+        if self.project and self.project._docs:
+            has_embeddings = self.project._kv is not None
 
             has_var = False
             if self._is_crossgroup():
                 has_var = (
-                    self.project._cached_groups is not None
-                    and len(self.project._cached_groups) > 0
-                    and len(np.unique(self.project._cached_groups)) >= 2
+                    self.project._groups is not None
+                    and len(self.project._groups) > 0
+                    and len(np.unique(self.project._groups)) >= 2
                 )
             else:
-                has_var = self.project._cached_y is not None
+                has_var = self.project._y is not None
 
             if has_var and has_embeddings:
-                is_lexicon = self.project.dataset_config.concept_mode == "lexicon"
+                is_lexicon = self.project.concept_mode == "lexicon"
                 if is_lexicon:
                     can_run = len(self.lexicon) > 0
                 else:
@@ -983,48 +1621,208 @@ class Stage2Widget(QWidget):
         if not self.project:
             return
 
-        dc = self.project.dataset_config
-        config = ConceptConfig()
+        # Save current settings to project before running
+        self._save_config_to_project()
 
-        # Mode from project config (set in Setup tab)
-        if dc.concept_mode == "lexicon":
-            config.mode = "lexicon"
-            config.lexicon_tokens = self.lexicon.copy()
+        # Pre-run validation
+        atype = self._get_analysis_type()
+        col = self.column_combo.currentText()
+
+        if atype in ("pls", "pca_ols") and (not col or col == "(none)"):
+            QMessageBox.warning(self, "Missing Column",
+                                "Please select an outcome column before running.")
+            return
+
+        if atype == "groups" and (not col or col == "(none)"):
+            QMessageBox.warning(self, "Missing Column",
+                                "Please select a group column before running.")
+            return
+
+        if self.lexicon_radio.isChecked() and not self.lexicon:
+            reply = QMessageBox.question(
+                self, "Empty Lexicon",
+                "No lexicon tokens defined. Run in full-document mode instead?",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.fulldoc_radio.setChecked(True)
+            else:
+                return
+
+        # Save concept settings to project
+        p = self.project
+        p.concept_mode = "lexicon" if self.lexicon_radio.isChecked() else "fulldoc"
+        p.analysis_type = atype
+        if atype == "groups":
+            p.group_column = col if col != "(none)" else None
         else:
-            config.mode = "fulldoc"
-            config.lexicon_tokens = None
+            p.outcome_column = col if col != "(none)" else None
+        if p.concept_mode == "lexicon":
+            p.lexicon_tokens = list(self.lexicon)
 
-        # Analysis type from project config (set in Setup tab)
-        if dc.analysis_type == "crossgroup":
-            config.analysis_type = "crossgroup"
-            config.group_column = dc.group_column
-            config.n_perm = dc.n_perm
+        p.mark_dirty()
+        self.run_requested.emit()
+
+    def _save_config_to_project(self):
+        """Persist current Stage 2 settings to project config."""
+        if not self.project:
+            return
+        p = self.project
+        p.analysis_type = self._get_analysis_type()
+        p.concept_mode = "lexicon" if self.lexicon_radio.isChecked() else "fulldoc"
+
+        col = self.column_combo.currentText()
+        if p.analysis_type == "groups":
+            p.group_column = col if col != "(none)" else None
         else:
-            config.analysis_type = "continuous"
-            config.outcome_column = dc.outcome_column
+            p.outcome_column = col if col != "(none)" else None
 
-        self.run_requested.emit(config)
+        # Hyperparameters — common
+        p.context_window_size = self.window_size_spin.value()
+        p.sif_a = self.sif_a_spin.value()
+        p.clustering_topn = self.cluster_topn_spin.value()
+        p.clustering_k_auto = self.cluster_k_auto_check.isChecked()
+        p.clustering_k_min = self.cluster_k_min_spin.value()
+        p.clustering_k_max = self.cluster_k_max_spin.value()
+        # clustering_top_words is display-only (default 10); don't overwrite from topn spin
+
+        # PLS
+        p.pls_n_components = self.pls_n_comp_spin.value()
+        p.pls_p_method = self.pls_p_method_combo.currentText()
+        p.pls_n_perm = self.pls_n_perm_spin.value()
+        p.pls_n_splits = self.pls_n_splits_spin.value()
+        p.pls_split_ratio = self.pls_split_ratio_spin.value()
+        p.pls_random_state = self.pls_random_state_combo.currentText()
+
+        # PCA+OLS
+        if self.fixed_k_check.isChecked():
+            p.pcaols_n_components = self.fixed_k_spin.value()
+        else:
+            p.pcaols_n_components = None
+        p.sweep_k_min = self.k_min_spin.value()
+        p.sweep_k_max = self.k_max_spin.value()
+        p.sweep_k_step = self.k_step_spin.value()
+
+        # Groups
+        p.groups_n_perm = self.groups_n_perm_spin.value()
+        p.groups_correction = self.groups_correction_combo.currentText()
+        p.groups_median_split = self.groups_median_split_check.isChecked()
+        p.groups_random_state = self.groups_random_state_combo.currentText()
+
+        # Persist lexicon tokens
+        p.lexicon_tokens = list(self.lexicon)
 
     # ------------------------------------------------------------------ #
     #  Public methods
     # ------------------------------------------------------------------ #
 
+    def reset(self):
+        """Clear all state for project close."""
+        self.project = None
+
     def load_project(self, project: Project):
         """Load a project into the UI."""
         self.project = project
 
-        is_lexicon = project.dataset_config.concept_mode == "lexicon"
+        # Restore analysis type
+        atype = project.analysis_type
+        if atype == "groups":
+            self.groups_btn.setChecked(True)
+        elif atype == "pca_ols":
+            self.pcaols_btn.setChecked(True)
+        else:
+            self.pls_btn.setChecked(True)
+        # Update button styles
+        for btn in [self.pls_btn, self.pcaols_btn, self.groups_btn]:
+            btn.setObjectName("btn_model_select_active" if btn.isChecked() else "btn_model_select")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
 
-        # Show/hide lexicon panel based on mode
-        self.lexicon_panel.setVisible(is_lexicon)
+        # Populate column combo and restore selection
+        self._populate_column_combo()
+        if atype == "groups" and project.group_column:
+            idx = self.column_combo.findText(project.group_column)
+            if idx >= 0:
+                self.column_combo.setCurrentIndex(idx)
+        elif project.outcome_column:
+            idx = self.column_combo.findText(project.outcome_column)
+            if idx >= 0:
+                self.column_combo.setCurrentIndex(idx)
 
-        # Restore lexicon from most recent run
+        # Restore mode
+        is_lexicon = project.concept_mode == "lexicon"
+        if is_lexicon:
+            self.lexicon_radio.setChecked(True)
+        else:
+            self.fulldoc_radio.setChecked(True)
+
+        # Show/hide lexicon panels based on mode
+        self.lexicon_group.setVisible(is_lexicon)
+        self.suggestions_group.setVisible(is_lexicon)
+
+        # Restore advanced settings — common
+        self.window_size_spin.setValue(project.context_window_size)
+        self.sif_a_spin.setValue(project.sif_a)
+        self.cluster_topn_spin.setValue(project.clustering_topn)
+        self.cluster_k_auto_check.setChecked(project.clustering_k_auto)
+        self.cluster_k_min_spin.setValue(project.clustering_k_min)
+        self.cluster_k_max_spin.setValue(project.clustering_k_max)
+
+        # PLS
+        self.pls_n_comp_spin.setValue(project.pls_n_components)
+        idx = self.pls_p_method_combo.findText(project.pls_p_method)
+        if idx >= 0:
+            self.pls_p_method_combo.setCurrentIndex(idx)
+        self.pls_n_perm_spin.setValue(project.pls_n_perm)
+        self.pls_n_splits_spin.setValue(project.pls_n_splits)
+        self.pls_split_ratio_spin.setValue(project.pls_split_ratio)
+        self.pls_random_state_combo.setCurrentText(project.pls_random_state)
+
+        # PCA+OLS
+        if project.pcaols_n_components is not None:
+            self.fixed_k_check.setChecked(True)
+            self.fixed_k_spin.setValue(project.pcaols_n_components)
+        else:
+            self.fixed_k_check.setChecked(False)
+        self.k_min_spin.setValue(project.sweep_k_min)
+        self.k_max_spin.setValue(project.sweep_k_max)
+        self.k_step_spin.setValue(project.sweep_k_step)
+
+        # Groups
+        self.groups_n_perm_spin.setValue(project.groups_n_perm)
+        idx = self.groups_correction_combo.findText(project.groups_correction)
+        if idx >= 0:
+            self.groups_correction_combo.setCurrentIndex(idx)
+        self.groups_median_split_check.setChecked(project.groups_median_split)
+        self.groups_random_state_combo.setCurrentText(project.groups_random_state)
+
+        # Context window visibility
+        self.window_size_label.setVisible(is_lexicon)
+        self.window_size_spin.setVisible(is_lexicon)
+        self._window_size_info.setVisible(is_lexicon)
+
+        # Analysis-type-specific frame visibility (frame + section label)
+        self.pls_section_label.setVisible(atype == "pls")
+        self.pls_frame.setVisible(atype == "pls")
+        self.sweep_section_label.setVisible(atype == "pca_ols")
+        self.sweep_frame.setVisible(atype == "pca_ols")
+        self.groups_section_label.setVisible(atype == "groups")
+        self.groups_frame.setVisible(atype == "groups")
+        self._on_pls_p_method_changed(project.pls_p_method)
+
+        # Column label
+        self.column_label.setText("Group Column:" if atype == "groups" else "Outcome Column:")
+
+        # Trigger column computation
+        self._on_column_changed()
+
+        # Restore lexicon from project state (preferred) or latest run (fallback)
         self.lexicon.clear()
-        if project.runs:
-            latest_run = project.runs[-1]
-            cc = latest_run.concept_config
-            if cc.mode == "lexicon" and cc.lexicon_tokens:
-                self.lexicon = cc.lexicon_tokens.copy()
+        if project.lexicon_tokens:
+            self.lexicon = set(project.lexicon_tokens)
+        elif project.results:
+            snap = project.results[-1].config_snapshot
+            if snap.get("concept_mode") == "lexicon" and snap.get("lexicon_tokens"):
+                self.lexicon = set(snap["lexicon_tokens"])
 
         self._update_lexicon_display()
 
@@ -1035,6 +1833,6 @@ class Stage2Widget(QWidget):
         if is_lexicon and self.lexicon:
             self._update_coverage()
 
-        self.view_results_btn.setEnabled(bool(project.runs))
+        self.view_results_btn.setEnabled(bool(project.results))
         self._update_sanity_checks()
         self._update_run_button()

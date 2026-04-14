@@ -62,6 +62,7 @@ class ProgressDialog(QDialog):
 
         self._cancelled = False
         self._errored = False
+        self._completed = False
         self._pending_accept = False
         self._pending_reject = False
 
@@ -222,7 +223,11 @@ class ProgressDialog(QDialog):
         super().accept()
 
     def accept(self):
-        """Accept (close) the dialog, deferring if mid-quote."""
+        """Accept (close) the dialog — immediate if completed/cancelled."""
+        if self._completed or self._cancelled:
+            self._quote_timer.stop()
+            super().accept()
+            return
         remaining = self._remaining_reading_ms()
         if remaining <= 0:
             self._quote_timer.stop()
@@ -311,6 +316,8 @@ class ProgressDialog(QDialog):
 
     def set_complete(self, message: str = "Complete!"):
         """Mark the operation as complete."""
+        self._completed = True
+        self._quote_timer.stop()
         self.progress_bar.setValue(100)
         self.status_label.setText(message)
         self.cancel_button.setText("Close")

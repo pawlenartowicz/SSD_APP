@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QGroupBox,
-    QWidget,
     QSizePolicy,
 )
 from PySide6.QtCore import Qt
@@ -114,7 +113,7 @@ class AppearanceDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Appearance")
         self.setMinimumWidth(700)
-        self.setMinimumHeight(420)
+        self.setMinimumHeight(580)
 
         self._selected_theme = get_saved_theme_name()
         self._selected_font_size = get_saved_font_size()

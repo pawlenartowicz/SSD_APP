@@ -2,11 +2,12 @@
 
 from .validators import Validator
 from .file_io import ProjectIO
-from .worker_threads import PreprocessWorker, EmbeddingWorker
+from .worker_threads import PreprocessWorker, EmbeddingPrepareWorker, EmbeddingLoadWorker
 
 __all__ = [
     "Validator",
     "ProjectIO",
     "PreprocessWorker",
-    "EmbeddingWorker",
+    "EmbeddingPrepareWorker",
+    "EmbeddingLoadWorker",
 ]

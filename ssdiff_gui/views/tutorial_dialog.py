@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QFont, QDesktopServices
+from PySide6.QtGui import QDesktopServices
 
 
 # ------------------------------------------------------------------
@@ -84,11 +84,11 @@ use cases:</p>
           with a text column and either a numeric outcome or a categorical
           group column.</td></tr>
   <tr><td><b>Word embeddings</b></td>
-      <td>A pre-trained embedding file (GloVe, fastText, or gensim
-          KeyedVectors). See the <em>Where to Get Embeddings</em> section below.</td></tr>
-  <tr><td><b>A spaCy model</b></td>
-      <td>A language model for tokenization and lemmatization
-          (English, Polish, German, French, Spanish, or Italian).</td></tr>
+      <td>A pre-trained embedding file (GloVe, fastText, gensim
+          KeyedVectors, or SSDiff <code>.ssdembed</code>). See the <em>Where to Get Embeddings</em> section below.</td></tr>
+  <tr><td><b>A language</b></td>
+      <td>Select a language in the app and the required spaCy model is
+          downloaded automatically. 19 languages supported.</td></tr>
 </table>"""),
     ]),
 
@@ -96,7 +96,7 @@ use cases:</p>
         ("gs-launch", "Launching the App", """
 <p>On first launch you see a <b>welcome screen</b> with options to create a new
 project or open an existing one. A project in SSD is a self-contained folder
-that stores your configuration, cached data, and all analysis runs.</p>"""),
+that stores your configuration, cached data, and all analysis results.</p>"""),
 
         ("gs-workflow", "The Three-Stage Workflow", """
 <p>The application is organised around three stages, visible in the navigation
@@ -151,9 +151,9 @@ selected &mdash; the number of unique IDs and the average texts per ID.</p>"""),
 
         ("s1-preprocess", "Preprocessing Text", """
 <ol>
-  <li>Select a <b>language</b> (English, Polish, German, French, Spanish,
-      Italian).</li>
-  <li>Select or confirm the <b>spaCy model</b>.</li>
+  <li>Select a <b>language</b> from the 19 supported languages (including English,
+      Polish, German, French, Spanish, and more). The required spaCy model is
+      downloaded automatically on first use.</li>
   <li>Leave <b>Lemmatize</b> and <b>Remove stopwords</b> enabled (recommended).</li>
   <li>Click <b>Preprocess Texts</b>.</li>
 </ol>
@@ -165,9 +165,15 @@ so the analysis focuses on meaning rather than surface variation.
         ("s1-embeddings", "Loading Word Embeddings", """
 <p>Word embeddings map every word to a point in high-dimensional space.
 SSD uses these to compute document-level semantic representations.</p>
-<p><b>Supported formats:</b> <code>.kv</code> (gensim KeyedVectors),
-<code>.bin</code> (word2vec / fastText binary), <code>.txt</code> and
-<code>.gz</code> (text format).</p>
+<p><b>Supported formats:</b> <code>.ssdembed</code> (SSDiff native),
+<code>.kv</code> (gensim KeyedVectors),
+<code>.bin</code> (word2vec / fastText binary), <code>.txt</code>,
+<code>.vec</code>, and <code>.gz</code> (text formats).</p>
+<p>The <code>.ssdembed</code> format is SSDiff&rsquo;s native format. It loads as
+fast as <code>.kv</code> but also tracks whether L2 normalisation and ABTT have
+already been applied, preventing accidental double-normalisation. Use it when
+moving embeddings between projects. <code>.ssdembed</code> files are created
+within the app &mdash; they are not available for download online.</p>
 <ol>
   <li>Click <b>Browse</b> and select your embedding file.</li>
   <li><b>L2 normalisation</b> (default on) &mdash; scales vectors to unit
@@ -180,62 +186,6 @@ SSD uses these to compute document-level semantic representations.</p>
 coverage (percentage of your words found), and OOV count.</p>
 <p><em>Tip:</em> If coverage is low, try a larger embedding file or one
 closer to your domain.</p>"""),
-
-        ("s1-hyperparams", "Hyperparameters (Advanced)", """
-<p>This section is collapsed by default. The defaults are sensible starting
-points &mdash; you can skip it entirely on a first analysis.</p>
-
-<h3>PCA Dimensionality</h3>
-<table>
-  <tr><th>Parameter</th><th>Default</th><th>What it controls</th></tr>
-  <tr><td>PCA Mode</td><td>Auto (PCA Sweep)</td>
-      <td>How SSD selects the number of principal components (K).
-          Auto tests a range and picks the best K via a joint
-          interpretability-stability score.</td></tr>
-  <tr><td>Manual K</td><td>20</td>
-      <td>Fixed number of PCA components (used when PCA mode is Manual).</td></tr>
-  <tr><td>Sweep K range</td><td>1&ndash;80, step 1</td>
-      <td>Range and step size of K values tested in Auto mode.</td></tr>
-  <tr><td>AUCK radius</td><td>3</td>
-      <td>Smoothing radius for the Area-Under-Curve-of-K metric used
-          in Auto selection. Larger values = more smoothing.</td></tr>
-  <tr><td>Beta smooth window</td><td>7</td>
-      <td>Window size for smoothing beta stability across K values.</td></tr>
-  <tr><td>Beta smooth kind</td><td>Median</td>
-      <td>Smoothing method: <em>median</em> (more robust) or <em>mean</em>.</td></tr>
-  <tr><td>Weight by cluster size</td><td>On</td>
-      <td>Weight interpretability metrics by cluster size in Auto selection.</td></tr>
-</table>
-
-<h3>Context &amp; Weighting</h3>
-<table>
-  <tr><th>Parameter</th><th>Default</th><th>What it controls</th></tr>
-  <tr><td>Context window</td><td>&plusmn;3 tokens</td>
-      <td>Tokens on each side of a keyword in Lexicon mode.</td></tr>
-  <tr><td>SIF parameter (a)</td><td>1e-3</td>
-      <td>Smooth Inverse Frequency weighting. Smaller &rarr; rarer words
-          matter more.</td></tr>
-</table>
-
-<h3>Model Settings</h3>
-<table>
-  <tr><th>Parameter</th><th>Default</th><th>What it controls</th></tr>
-  <tr><td>Unit beta</td><td>On</td>
-      <td>Normalise the beta vector to unit length for interpretation.</td></tr>
-  <tr><td>L2 normalise docs</td><td>On</td>
-      <td>L2-normalise the final document vectors before regression.</td></tr>
-</table>
-
-<h3>Clustering</h3>
-<table>
-  <tr><th>Parameter</th><th>Default</th><th>What it controls</th></tr>
-  <tr><td>Top N neighbours</td><td>100</td>
-      <td>How many top pole words to cluster at each pole.</td></tr>
-  <tr><td>Auto-select K</td><td>On (silhouette)</td>
-      <td>Automatically pick the number of clusters using silhouette scores.</td></tr>
-  <tr><td>Clustering K range</td><td>2&ndash;10</td>
-      <td>Range of cluster counts to try when auto-selecting.</td></tr>
-</table>"""),
 
         ("s1-ready", "The &ldquo;Project Ready&rdquo; Indicator", """
 <p>At the bottom of Stage 1, a status indicator shows whether all inputs are
@@ -300,6 +250,118 @@ keywords connect to the data:</p>
 <p>No keywords needed &mdash; SSD computes a semantic representation for
 each entire document, taking all of the words into account.</p>"""),
 
+        ("s2-backend", "Choosing an Analysis Backend", """
+<p>For continuous outcomes, the app offers two backends. For categorical
+groups, use the Groups backend.</p>
+<table>
+  <tr><th>Backend</th><th>Description</th><th>Key difference</th></tr>
+  <tr><td><b>PLS</b></td>
+      <td>Added in v1.0.0. Fewer tuning parameters. Includes significance
+          testing methods (permutation and novel split-half).</td>
+      <td>Finds the optimal direction directly via the NIPALS algorithm.
+          No separate PCA step.</td></tr>
+  <tr><td><b>PCA+OLS</b></td>
+      <td>The original backend described in the paper. Offers the PCA sweep
+          plot for exploring how the number of PCA components affects
+          results.</td>
+      <td>Two-step: PCA dimensionality reduction first, then OLS regression.
+          More hyperparameters to tune.</td></tr>
+  <tr><td><b>Groups</b></td>
+      <td>For categorical group comparison.</td>
+      <td>Permutation-based pairwise contrasts between group centroids.</td></tr>
+</table>
+<p>Select your backend in the toolbar at the top of Stage 2 before running
+the analysis.</p>"""),
+
+        ("s2-pls", "PLS Settings (Advanced)", """
+<p>These settings appear in the collapsible Advanced Settings panel when PLS
+is selected.</p>
+<table>
+  <tr><th>Parameter</th><th>Default</th><th>What it controls</th></tr>
+  <tr><td>Components</td><td>1 (0 = auto via CV)</td>
+      <td>Number of PLS components. Set to 0 to select automatically via
+          cross-validation.</td></tr>
+  <tr><td>p-value method</td><td>auto</td>
+      <td>How significance is tested. See below.</td></tr>
+  <tr><td>Permutations</td><td>1000</td>
+      <td>Number of permutations for the permutation test.</td></tr>
+  <tr><td>Splits</td><td>50</td>
+      <td>Number of random splits for split-half tests.</td></tr>
+  <tr><td>Split ratio</td><td>0.5</td>
+      <td>Fraction of data in each split half.</td></tr>
+  <tr><td>Random state</td><td>default (2137)</td>
+      <td>Seed for reproducibility.</td></tr>
+</table>
+<h3>p-value methods</h3>
+<ul>
+  <li><b>perm</b> (permutation) &mdash; standard, well-established method.
+      Shuffles the outcome variable many times to build a null distribution
+      of cross-validated R&sup2;. Use this when you want a safe, conventional
+      significance estimate.</li>
+  <li><b>split</b> (split-half with overlap correction) &mdash; novel method
+      (Lenartowicz, 2026, in preparation). Repeatedly splits data in half,
+      fits on one half, tests on the other. Uses an overlap-corrected
+      standard error. Returns mean cross-half correlation as effect size.</li>
+  <li><b>split_cal</b> (permutation-calibrated split-half) &mdash; novel
+      method (Lenartowicz, 2026, in preparation). Runs the full split-half
+      procedure on permuted y to build an exact null distribution.
+      Guarantees correct false-positive rate. Computationally expensive.</li>
+  <li><b>auto</b> &mdash; selects <em>split</em> when components = 1,
+      <em>perm</em> when components &gt; 1.</li>
+  <li><b>none</b> &mdash; skip p-value computation entirely.</li>
+</ul>"""),
+
+        ("s2-text", "Text Processing Settings (Advanced)", """
+<p>These settings apply to all backends and appear in the collapsible
+Advanced Settings panel.</p>
+<table>
+  <tr><th>Parameter</th><th>Default</th><th>What it controls</th></tr>
+  <tr><td>Context window</td><td>&plusmn;3 tokens</td>
+      <td>Tokens on each side of a keyword in Lexicon mode. Only visible
+          when Lexicon mode is selected.</td></tr>
+  <tr><td>SIF parameter (a)</td><td>1e-3</td>
+      <td>Smooth Inverse Frequency weighting. Smaller &rarr; rarer words
+          matter more.</td></tr>
+</table>"""),
+
+        ("s2-pcaols", "PCA+OLS Settings (Advanced)", """
+<p>These settings appear in the collapsible Advanced Settings panel when
+PCA+OLS is selected.</p>
+<table>
+  <tr><th>Parameter</th><th>Default</th><th>What it controls</th></tr>
+  <tr><td>K sweep range</td><td>20 to 120, step 2</td>
+      <td>Range and step size of K values tested. The best K is selected
+          by R&sup2; on the outcome.</td></tr>
+</table>"""),
+
+        ("s2-groups", "Group Settings (Advanced)", """
+<p>These settings appear in the collapsible Advanced Settings panel when
+Groups is selected.</p>
+<table>
+  <tr><th>Parameter</th><th>Default</th><th>What it controls</th></tr>
+  <tr><td>Median split</td><td>Off</td>
+      <td>When on, splits a numeric outcome at the median to create two
+          groups. Useful when you have a continuous variable but want to
+          compare &ldquo;high&rdquo; vs &ldquo;low&rdquo; groups.</td></tr>
+  <tr><td>Permutations</td><td>5000</td>
+      <td>Number of permutations for the null distribution.</td></tr>
+  <tr><td>Correction</td><td>Holm</td>
+      <td>Multiple-comparison correction method: Holm, Bonferroni,
+          or FDR-BH.</td></tr>
+</table>"""),
+
+        ("s2-clustering", "Clustering Settings (Advanced)", """
+<p>These settings apply to all backends.</p>
+<table>
+  <tr><th>Parameter</th><th>Default</th><th>What it controls</th></tr>
+  <tr><td>Top N neighbours</td><td>100</td>
+      <td>How many top pole words to cluster at each pole.</td></tr>
+  <tr><td>Auto-select K</td><td>On (silhouette)</td>
+      <td>Automatically pick the number of clusters using silhouette scores.</td></tr>
+  <tr><td>Clustering K range</td><td>2&ndash;10</td>
+      <td>Range of cluster counts to try when auto-selecting.</td></tr>
+</table>"""),
+
         ("s2-preflight", "Run Details", """
 <p>The left panel displays a read-only summary of your entire configuration.
 Below the summary, <b>sanity checks</b> verify outcome variance, sample
@@ -308,7 +370,7 @@ size, and OOV levels. Each check shows a green, yellow, or red indicator.</p>
 
         ("s2-run", "Running the Analysis", """
 <p>Click <b>Run SSD Analysis</b>. The analysis computes document embeddings,
-performs PCA reduction, finds the beta vector (or group contrasts), extracts
+performs dimensionality reduction (PCA or PLS depending on the selected backend), finds the beta vector (or group contrasts), extracts
 pole words, clusters them into themes, and extracts illustrative snippets.</p>
 <p>A progress dialog shows the current step. The process typically takes a
 few seconds to a minute depending on dataset size.</p>"""),
@@ -319,7 +381,23 @@ few seconds to a minute depending on dataset size.</p>"""),
 <p>A row of cards at the top of the results view presents the key statistics
 at a glance. The cards adapt to the analysis type.</p>
 
-<h3>Continuous Analysis</h3>
+<h3>PLS Analysis</h3>
+<table>
+  <tr><th>Card</th><th>What it means</th></tr>
+  <tr><td><b>R&sup2;</b></td>
+      <td>Proportion of outcome variance explained by the semantic
+          dimension. Even modest values (0.05&ndash;0.20) can be meaningful
+          in text-based research.</td></tr>
+  <tr><td><b>p-value</b></td>
+      <td>Significance of the association. The method used (permutation,
+          split-half, etc.) is shown alongside the value.</td></tr>
+  <tr><td><b>Components</b></td>
+      <td>Number of PLS components used.</td></tr>
+  <tr><td><b>Documents Used</b></td>
+      <td>Number of documents (or profiles) kept after filtering.</td></tr>
+</table>
+
+<h3>PCA+OLS Analysis</h3>
 <table>
   <tr><th>Card</th><th>What it means</th></tr>
   <tr><td><b>R&sup2;</b></td>
@@ -372,8 +450,8 @@ at a glance. The cards adapt to the analysis type.</p>
           cosine distance across all group centroids). Tests whether
           <em>any</em> groups differ semantically.</td></tr>
   <tr><td><b>p (corrected)</b></td>
-      <td>Bonferroni-corrected p-value for the currently viewed pairwise
-          contrast.</td></tr>
+      <td>Corrected p-value for the currently viewed pairwise contrast
+          (Holm by default; correction method is configurable).</td></tr>
   <tr><td><b>Cohen&rsquo;s d</b></td>
       <td>Standardised effect size for the viewed contrast.</td></tr>
   <tr><td><b>Cos Distance</b></td>
@@ -423,10 +501,10 @@ statistics:</p>
           Another perspective on model fit.</td></tr>
 </table>
 <p>For <b>group comparison</b> analyses, the pairwise results table is shown
-with cosine distance, permutation p-values (raw and Bonferroni-corrected),
+with cosine distance, permutation p-values (raw and corrected),
 and Cohen&rsquo;s d for each pair.</p>
-<p>Important for <b>reproducibility</b> &mdash; when you have several runs you
-can see exactly what produced each result.</p>"""),
+<p>Important for <b>reproducibility</b> &mdash; when you have several results you
+can see exactly what produced each one.</p>"""),
 
         ("s3-pca", "PCA Sweep", """
 <p><em>Only available for continuous analyses with PCA mode set to Auto.</em></p>
@@ -490,46 +568,59 @@ when a row is selected:</p>
 <p>Sort by any column to find highest/lowest scoring documents or
 outliers.</p>"""),
 
-        ("s3-saving", "Saving Runs", """
-<p>After an analysis completes, the run initially exists only in memory.
+        ("s3-extreme", "Extreme Documents", """
+<p><em>Available for continuous analyses only.</em></p>
+<p>A table of the most extreme documents &mdash; those with the highest and
+lowest predicted (or observed) outcome values. Use the <b>By</b> toggle to
+switch between ranking by predicted value or by observed value.</p>
+<p>This helps identify which documents are most strongly associated with
+each pole of the semantic dimension. Reading extreme documents is a quick
+way to get an intuitive sense of what the dimension captures.</p>"""),
+
+        ("s3-misdiagnosed", "Misdiagnosed Documents", """
+<p><em>Available for continuous analyses only.</em></p>
+<p>Shows documents where the model&rsquo;s prediction diverges most from the
+actual observed value &mdash; the largest residuals. These are texts that
+&ldquo;should&rdquo; score high based on their language but actually have low
+observed values (over-predicted), or vice versa (under-predicted).</p>
+<p>Use the <b>Side</b> filter to view over-predicted, under-predicted, or
+both. Misdiagnosed documents can reveal interesting edge cases, data quality
+issues, or texts that use language in unexpected ways relative to the
+semantic dimension.</p>"""),
+
+        ("s3-saving", "Saving Results", """
+<p>After an analysis completes, the result initially exists only in memory.
 To save it permanently:</p>
 <ol>
   <li>Enter a descriptive name in the text field at the top of the results
       view (e.g.&nbsp;&ldquo;Self-reference lexicon, GloVe 300d&rdquo;).</li>
-  <li>Click <b>Save to Archive</b>.</li>
+  <li>Click <b>Save Result</b>.</li>
 </ol>
-<p>Saved runs appear in the run selector dropdown and persist across sessions.
-You can switch between saved runs to compare results.</p>
-<p>If you leave Stage 3 without saving, the run is lost.</p>"""),
+<p>Saved results appear in the result selector dropdown and persist across sessions.
+You can switch between saved results to compare.</p>
+<p>If you leave Stage 3 without saving, the result is lost.</p>"""),
 
         ("s3-export", "Exporting Results", """
-<p>Click the <b>Export All Results...</b> button and choose an output
-directory. The app writes all result files at once:</p>
+<p>When you save a result, the app writes the following files into the result
+folder:</p>
 <table>
   <tr><th>File</th><th>Format</th><th>Contents</th></tr>
-  <tr><td>scores.csv</td><td>CSV</td>
-      <td>Per-document scores for import into R, SPSS, Stata, etc.</td></tr>
-  <tr><td>poles.csv</td><td>CSV</td>
-      <td>Ranked pole word lists with cosine similarities.</td></tr>
-  <tr><td>regression.docx</td><td>Word</td>
-      <td>APA-formatted regression table. <em>Continuous only.</em></td></tr>
-  <tr><td>pairwise_comparison.docx</td><td>Word</td>
-      <td>APA-formatted comparison table. <em>Group comparison only.</em></td></tr>
-  <tr><td>clusters.docx</td><td>Word</td>
-      <td>Cluster summaries with top words, sizes, coherence.</td></tr>
-  <tr><td>snippets_cluster.docx</td><td>Word</td>
-      <td>Snippet tables organised by cluster.</td></tr>
-  <tr><td>snippets_beta.docx / snippets_contrast.docx</td><td>Word</td>
-      <td>Snippet tables organised by beta alignment (continuous)
-          or contrast (group comparison).</td></tr>
-  <tr><td>pca_sweep.png</td><td>PNG</td>
-      <td>PCA sweep plot. <em>Continuous + Auto PCA only.</em></td></tr>
+  <tr><td>results.txt</td><td>TXT</td>
+      <td>Human-readable report. Contents controlled by Report Settings.</td></tr>
+  <tr><td>results.pkl</td><td>PKL</td>
+      <td>Complete result object (scores, poles, clusters, snippets).
+          Load in Python for further analysis.</td></tr>
   <tr><td>config.json</td><td>JSON</td>
       <td>Complete configuration snapshot for reproducibility.</td></tr>
+  <tr><td>replication_script.py</td><td>Python</td>
+      <td>Standalone script to reproduce this result from scratch using
+          the <code>ssdiff</code> library.</td></tr>
 </table>
-<p>The Word documents follow <b>APA style</b>: horizontal rules at the header
-and footer, no vertical rules, Times New Roman. Insert them directly into a
-manuscript or supplementary materials.</p>"""),
+<p>The replication script hardcodes all parameters and file paths, making it
+easy to share exact methodology with collaborators or re-run the analysis
+outside the GUI.</p>
+<p>Use <b>Report Settings</b> (in the results toolbar) to control which
+sections appear in the <code>results.txt</code> file.</p>"""),
     ]),
 
     ("analysis-types", "Types of Analysis", None, [
@@ -544,8 +635,8 @@ co-vary with well-being.</p>
 <ol>
   <li>Stage 1 &mdash; Load the dataset, select Continuous Outcome, preprocess,
       load embeddings.</li>
-  <li>Stage 2 &mdash; Select <b>Full Document</b> mode. Review the run details
-      panel. Run.</li>
+  <li>Stage 2 &mdash; Choose <b>PLS</b> or <b>PCA+OLS</b> as the backend.
+      Select <b>Full Document</b> mode. Review the run details panel. Run.</li>
   <li>Stage 3 &mdash; The positive pole will show themes associated with
       <em>higher</em> scores; the negative pole with <em>lower</em>
       scores.</li>
@@ -566,9 +657,9 @@ context window around each pronoun.</p>
 <ol>
   <li>Stage 1 &mdash; Load data, select Continuous Outcome, preprocess, load
       embeddings.</li>
-  <li>Stage 2 &mdash; Select <b>Lexicon</b> mode. Build your keyword set.
-      Check coverage statistics. Use suggestions to discover additional
-      relevant tokens.</li>
+  <li>Stage 2 &mdash; Choose <b>PLS</b> or <b>PCA+OLS</b> as the backend.
+      Select <b>Lexicon</b> mode. Build your keyword set. Check coverage
+      statistics. Use suggestions to discover additional relevant tokens.</li>
   <li>Stage 3 &mdash; The dimension now reflects <em>how</em> the concept is
       talked about, not whether it appears. Positive-pole themes show the
       <em>style</em> of self-reference associated with lower severity;
@@ -623,25 +714,27 @@ treatment-talk differs across diagnostic groups.</p>
 <pre>my_project/
   project.json              # Configuration and metadata
   data/
-    preprocessed_docs.pkl   # Cached preprocessed text
-  runs/
-    20250601_143015/        # One folder per saved run
+    corpus.pkl              # Cached preprocessed text
+  results/
+    20250601_143015/        # One folder per saved result
       config.json
-      results.pkl</pre>"""),
+      results.pkl
+      results.txt
+      replication_script.py</pre>"""),
 
         ("proj-save", "Saving", """
 <p>Use <b>File &rarr; Save Project</b> (or the keyboard shortcut) at any time.
 The project file stores your current Stage 1 configuration, cached data
-references, and metadata for all saved runs.</p>
-<p>Analysis runs must be saved separately. After a run completes in Stage 3,
-enter a name and click <b>Save to Archive</b> to persist it. Unsaved runs
+references, and metadata for all saved results.</p>
+<p>Analysis results must be saved separately. After a run completes in Stage 3,
+enter a name and click <b>Save Result</b> to persist it. Unsaved results
 are lost when you close the project or leave Stage 3.</p>"""),
 
         ("proj-followup", "Follow-Up Analyses", """
 <p>Go back to Stage 2, change your lexicon or concept mode, and run again.
-Each run is stored independently. Compare results by switching runs in the
+Each result is stored independently. Compare results by switching results in the
 Stage 3 dropdown.</p>
-<p>All runs within a project share the same preprocessed data and embeddings,
+<p>All results within a project share the same preprocessed data and embeddings,
 so you only pay the loading cost once.</p>"""),
     ]),
 
@@ -669,11 +762,23 @@ so you only pay the loading cost once.</p>"""),
         the beta vector.</td></tr>
 <tr><td><b>Embedding</b></td>
     <td>A vector representation of a word in high-dimensional space.</td></tr>
+<tr><td><b>FDR</b></td>
+    <td>False Discovery Rate &mdash; controls expected proportion of false
+        positives among rejections.</td></tr>
+<tr><td><b>Holm correction</b></td>
+    <td>Step-down multiple-comparison correction for group analyses. Less
+        conservative than Bonferroni.</td></tr>
 <tr><td><b>IQR effect</b></td>
     <td>Outcome difference between the 75th and 25th percentile of
         semantic scores.</td></tr>
 <tr><td><b>Lemma</b></td>
     <td>Base form of a word (running &rarr; run).</td></tr>
+<tr><td><b>Median split</b></td>
+    <td>Converts a continuous variable into two groups by splitting at the
+        median value.</td></tr>
+<tr><td><b>NIPALS</b></td>
+    <td>Non-linear Iterative Partial Least Squares &mdash; the algorithm
+        used by PLS to extract components.</td></tr>
 <tr><td><b>OOV</b></td>
     <td>Out of vocabulary &mdash; word not in the embedding file.</td></tr>
 <tr><td><b>PCA</b></td>
@@ -685,17 +790,28 @@ so you only pay the loading cost once.</p>"""),
 <tr><td><b>Permutation test</b></td>
     <td>Non-parametric significance test that shuffles group labels to
         build a null distribution. Used for group comparisons.</td></tr>
+<tr><td><b>PLS</b></td>
+    <td>Partial Least Squares &mdash; a regression backend that finds the
+        optimal direction via the NIPALS algorithm. Added in v1.0.0.</td></tr>
 <tr><td><b>Pole</b></td>
     <td>One end of the semantic dimension (positive = higher outcome,
         negative = lower).</td></tr>
 <tr><td><b>R&sup2;</b></td>
     <td>Proportion of outcome variance explained by the dimension
         (0 to 1).</td></tr>
+<tr><td><b>Replication script</b></td>
+    <td>Auto-generated Python script that reproduces a saved result from
+        scratch.</td></tr>
 <tr><td><b>SIF</b></td>
     <td>Smooth Inverse Frequency &mdash; weighting that down-weights common
         words when building document embeddings.</td></tr>
 <tr><td><b>Snippet</b></td>
     <td>A real sentence from the data illustrating a pole or cluster.</td></tr>
+<tr><td><b>Split-half test</b></td>
+    <td>Novel significance test (Lenartowicz, 2026, in preparation) that
+        repeatedly splits the data in half, fits on one half, and tests on
+        the other. Reports mean cross-half correlation. Use permutation test
+        for a standard, well-established alternative.</td></tr>
 <tr><td><b>Stopwords</b></td>
     <td>Frequent function words (the, is, and) removed during
         preprocessing.</td></tr>
@@ -786,13 +902,15 @@ fastText website. Download the <code>.bin</code> format.</p>
 <h3>Format Compatibility</h3>
 <table>
   <tr><th>Format</th><th>Extension</th><th>Notes</th></tr>
-  <tr><td>gensim KeyedVectors</td><td>.kv</td><td>Fastest to load.</td></tr>
+  <tr><td>SSDiff native</td><td>.ssdembed</td><td>As fast as .kv. Tracks L2/ABTT state, preventing double-normalisation. Created within the app.</td></tr>
+  <tr><td>gensim KeyedVectors</td><td>.kv</td><td>Fast to load.</td></tr>
   <tr><td>word2vec binary</td><td>.bin</td><td>Standard binary format.</td></tr>
-  <tr><td>Text</td><td>.txt</td><td>One word per line + floats.</td></tr>
+  <tr><td>Text</td><td>.txt, .vec</td><td>One word per line + floats.</td></tr>
   <tr><td>Compressed text</td><td>.gz</td><td>Gzip-compressed text.</td></tr>
 </table>
-<p><em>Tip:</em> Convert to <code>.kv</code> once (via gensim in Python) for
-faster loading across projects.</p>""", []),
+<p><em>Tip:</em> After loading embeddings in the app, save them as
+<code>.ssdembed</code> for faster loading across projects and to preserve
+normalisation state.</p>""", []),
 ]
 
 

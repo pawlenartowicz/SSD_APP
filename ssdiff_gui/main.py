@@ -1,8 +1,8 @@
 """Entry point for SSD application."""
 
+import os
 import sys
 import multiprocessing
-from pathlib import Path
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -17,6 +17,13 @@ from ssdiff_gui.utils.linux_install import register as _linux_register
 def main():
     """Main entry point."""
     multiprocessing.freeze_support()
+
+    # Suppress spurious Wayland text-input warnings (Qt bug, not actionable)
+    rules = os.environ.get("QT_LOGGING_RULES", "")
+    suppress = "qt.qpa.wayland.textinput=false"
+    os.environ["QT_LOGGING_RULES"] = (
+        suppress + ";" + rules if rules else suppress
+    )
 
     # Enable high DPI scaling
     QApplication.setHighDpiScaleFactorRoundingPolicy(
@@ -68,13 +75,13 @@ def main():
     window.show()
 
     def _on_new_connection():
-        conn = server.nextPendingConnection()
+        conn = server.nextPendingConnection()  # noqa: F821 (closure)
         conn.waitForReadyRead(200)
         conn.readAll()  # consume the message
         conn.disconnectFromServer()
-        window.setWindowState(window.windowState() & ~Qt.WindowMinimized)
-        window.raise_()
-        window.activateWindow()
+        window.setWindowState(window.windowState() & ~Qt.WindowMinimized)  # noqa: F821 (closure)
+        window.raise_()  # noqa: F821 (closure)
+        window.activateWindow()  # noqa: F821 (closure)
 
     server.newConnection.connect(_on_new_connection)
 

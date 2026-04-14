@@ -11,13 +11,21 @@
 <p align="center">A desktop application for <b>Supervised Semantic Differential (SSD)</b> analysis.</p>
 
 <p align="center">
+  <a href="https://github.com/hplisiecki/SSD_APP/actions"><img src="https://github.com/hplisiecki/SSD_APP/workflows/Tests/badge.svg" alt="Tests"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python 3.10+"></a>
+  <a href="https://www.gnu.org/licenses/gpl-3.0"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3"></a>
+  <a href="https://doi.org/10.31234/osf.io/gvrsb_v1"><img src="https://img.shields.io/badge/DOI-10.31234%2Fosf.io%2Fgvrsb__v1-blue" alt="DOI"></a>
+  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg" alt="Platform">
+</p>
+
+<p align="center">
   <a href="https://github.com/hplisiecki/SSD_APP/releases/latest">Download</a> &nbsp;|&nbsp;
   <a href="https://github.com/hplisiecki/Supervised-Semantic-Differential">ssdiff core library</a>
 </p>
 
 SSD finds interpretable semantic dimensions in text data that are associated with a continuous outcome variable or categorical group labels.
 
-Given a corpus of texts with associated numeric scores or group memberships, SSD identifies the direction through word-embedding space that best explains variation in the outcome. The result is a semantic dimension with two interpretable poles one associated with high outcomes, the other with low; complete with thematic clusters, example sentences, and statistical validation.
+Given a corpus of texts with associated numeric scores or group memberships, SSD identifies the direction through word-embedding space that best explains variation in the outcome. The result is a semantic dimension with two interpretable poles — one associated with high outcomes, the other with low — complete with thematic clusters, example sentences, and statistical validation.
 
 This application is the GUI frontend for the [ssdiff](https://github.com/hplisiecki/Supervised-Semantic-Differential) Python package.
 
@@ -33,15 +41,22 @@ spaCy language models are downloaded automatically on first use.
 
 ---
 
-## What's New in v1.1.0
+## Tutorial
 
-> **Already have v1.0.0?** Starting from this release, SSD will automatically notify you when a new version is available — but since v1.0.0 didn't have that feature yet, you'll need to download v1.1.0 manually once. After that, the app will alert you in-app whenever a newer release is out.
+The app includes a **built-in tutorial** accessible from the menu bar. It covers the full workflow with detailed explanations:
 
-- **Automatic update notifications** — on startup the app silently checks GitHub for a newer release and shows a dismissible banner with a direct download link
-- **Export options** — configure which columns appear in exported Word tables (cluster, regression, and pairwise tables) and how many top words are shown per cluster
-- **Delete saved runs** — remove archived runs from the run selector with a confirmation prompt
-- **New appearance themes** — two new light-mode themes (Crisp and Warm) for users who prefer lower-saturation palettes
-- **Outcome/Group column shown in run details** — the Config tab now displays which outcome or group column was used for a run
+| Section | Contents |
+|---------|----------|
+| **What Is SSD?** | The problem SSD solves, how the method works, when to use it, and what you need |
+| **Getting Started** | Launching the app, the three-stage workflow, and menu bar overview |
+| **Stage 1 — Setup** | Loading datasets, choosing analysis type, preprocessing text, loading embeddings |
+| **Stage 2 — Run** | Concept modes (lexicon vs. full-document), backend selection (PLS vs. PCA+OLS), advanced settings |
+| **Stage 3 — Results** | Cluster overview, semantic poles, snippets, document scores, exporting |
+| **Types of Analysis** | Four analysis combinations: continuous/group × full-document/lexicon |
+| **Projects** | Saving, loading, and follow-up analyses |
+| **Glossary** | Key terms and concepts |
+| **Troubleshooting** | Common issues with datasets, embeddings, lexicons, and analysis |
+| **Where to Get Embeddings** | Sources for pre-trained word embeddings by language |
 
 ---
 
@@ -77,12 +92,13 @@ SSD requires pre-trained word embeddings, which are **not bundled** with the app
 
 | Format | Extension | Notes |
 |--------|-----------|-------|
-| gensim KeyedVectors | `.kv` | Fastest to load |
+| SSD native | `.ssdembed` | Fastest to load; tracks L2/ABTT state to prevent double-normalization |
+| gensim KeyedVectors | `.kv` | Fast to load |
 | word2vec binary | `.bin` | Standard binary format |
 | Text | `.txt`, `.vec` | One word per line + floats |
-| Compressed text | `.txt.gz`, `.vec.gz` | Gzip-compressed text |
+| Compressed | `.txt.gz`, `.vec.gz`, `.bin.gz` | Gzip-compressed versions of the above |
 
-> **Tip:** The app offers to convert text-format embeddings to `.kv` on first load, which makes subsequent loads much faster.
+> **Tip:** On first load, the app normalizes and saves embeddings as `.ssdembed` for faster loading in subsequent sessions.
 
 ---
 
@@ -98,18 +114,19 @@ SSD requires pre-trained word embeddings, which are **not bundled** with the app
 ## Features
 
 - **Three-stage guided workflow** — Setup, Run, and Results, with validation at each step
+- **Two analysis backends** — PLS (single-pass, no dimensionality choice) or PCA+OLS (automated PCA sweep with manual override)
 - **Two analysis modes** — continuous outcome regression or categorical group comparison with permutation tests
 - **Two concept modes** — full-document analysis or lexicon-focused with context windows
 - **Interactive lexicon builder** — token suggestions ranked by correlation, per-token coverage statistics with quartile breakdowns
-- **Automated PCA sweep** — elbow detection for optimal dimensionality, with manual override
 - **Cluster interpretation** — K-means clustering of pole neighbors with coherence scores and representative snippets
 - **Snippet browser** — real sentences from the data, organized by cluster or beta alignment, with full document context
-- **APA-formatted export** — regression tables, pairwise comparisons, and cluster summaries as Word documents, with configurable column selection
-- **Comprehensive export** — CSV scores, pole neighbors, PCA plots, configuration JSON, and a human-readable hyperparameters file
+- **Per-result export** — human-readable report (`results.txt`), configuration snapshot (`config.json`), full result object (`results.pkl`), and a standalone replication script (`replication_script.py`)
+- **Configurable report** — control which sections and how many items appear in the saved report via Report Settings
 - **Project system** — save, reload, and delete analyses; run multiple analyses with different lexicons or settings
 - **Automatic update notifications** — silent startup check against GitHub releases with a dismissible in-app banner
-- **Customizable appearance** — multiple color themes (including light-mode options) and font size scaling
-- **In-app tutorial** — navigable guide with table of contents
+- **Customizable appearance** — eight color themes (six dark, two light) and four font size levels
+- **In-app tutorial** — navigable guide with table of contents covering the full workflow
+- **Single-instance guard** — prevents multiple windows from opening simultaneously
 
 ---
 
@@ -130,9 +147,6 @@ cd SSD_APP
 # Install dependencies
 pip install -r requirements.txt
 
-# Asian language support (Chinese, Japanese, Korean)
-pip install spacy-pkuseg sudachipy sudachidict-core
-
 # Run the application
 python run.py
 ```
@@ -140,6 +154,7 @@ python run.py
 ### Building the Executable
 
 ```bash
+pip install pyinstaller
 pyinstaller SSD.spec --clean --noconfirm
 ```
 
@@ -152,11 +167,10 @@ pyinstaller SSD.spec --clean --noconfirm
 Configure the data, text processing, and embedding settings.
 
 1. **Load dataset** — import a CSV, TSV, or Excel file and select the text, ID, and outcome/group columns
-2. **Validate** — check for missing values and confirm the dataset is ready
-3. **Preprocess** — tokenize, lemmatize, and sentence-split texts using spaCy
-4. **Load embeddings** — load a pre-trained word-embedding file with optional L2 normalization and ABTT (All-But-The-Top) denoising; text-format files (`.txt`, `.vec`) can be auto-converted to `.kv` for faster future loading
-5. **Choose analysis type** — continuous outcome (regression) or group comparison (permutation test)
-6. **Set hyperparameters** — PCA sweep range, context window size, SIF weighting, clustering parameters, and more
+2. **Preprocess** — tokenize, lemmatize, and sentence-split texts using spaCy
+3. **Load embeddings** — load a pre-trained word-embedding file; the app normalizes (L2 + ABTT) and saves as `.ssdembed` for faster reuse
+4. **Choose analysis type** — continuous outcome (regression) or group comparison (permutation test)
+5. **Set hyperparameters** — context window size, SIF weighting, random seed, and optional PCA preprocessing
 
 A ready indicator shows which sections are complete before proceeding.
 
@@ -166,8 +180,9 @@ Define the concept and execute the analysis.
 
 - **Lexicon mode** — build a keyword list using the interactive lexicon builder with automated suggestions, coverage statistics, and per-token diagnostics
 - **Full-document mode** — analyze entire texts with an optional custom stoplist
+- **Backend selection** — choose PLS (recommended, single-pass) or PCA+OLS (sweep across PCA dimensionalities)
 - **Pre-flight review** — a read-only summary of the full configuration with sanity checks (outcome variance, sample size, OOV rate)
-- **Run** — executes the SSD pipeline: document embedding, PCA, beta estimation, pole extraction, clustering, and snippet collection
+- **Run** — executes the SSD pipeline: document embedding, dimensionality reduction, beta estimation, pole extraction, clustering, and snippet collection
 
 ### Stage 3: Results
 
@@ -175,22 +190,21 @@ Explore and export the results across multiple tabs.
 
 | Tab | Contents |
 |-----|----------|
-| **Summary** | R², F-statistic, p-value, standardized beta, effect sizes, sample counts |
-| **Clusters** | Side-by-side positive/negative cluster tables with size, coherence, and top words |
-| **Poles** | Ranked word lists for each pole with cosine similarities |
-| **Themes** | Detailed cluster view with full member lists |
-| **Snippets** | Real sentences organized by cluster or beta alignment with document context |
-| **Scores** | Per-document table with cosine scores, predicted values, and true outcomes |
-| **PCA Sweep** | Plot of fit criterion across K values with selected elbow (auto mode) |
-| **Config** | Read-only snapshot of all settings used for the run |
+| **Cluster Overview** | Side-by-side positive/negative cluster tables with size, coherence, and top words |
+| **Details** | R², p-value, effect sizes, sample counts, dataset info, and full configuration snapshot |
+| **Semantic Poles** | Ranked word lists for each pole with cosine similarities |
+| **Snippets** | Real sentences organized by beta alignment with document context |
+| **Document Scores** | Per-document table with cosine scores, predicted values, and true outcomes |
+| **Extreme Documents** | Top/bottom documents by predicted or observed outcome |
+| **Misdiagnosed** | Documents where model predictions diverge most from actual outcomes |
+| **PCA Sweep** | Plot of fit criterion across K values with selected elbow (PCA+OLS only) |
 
-Multiple runs can be saved and compared using the run selector. Results can be exported as:
+Multiple runs can be saved and compared using the run selector. Each saved result includes:
 
-- **CSV** — per-document scores, pole neighbors
-- **Word (.docx)** — APA-formatted regression/comparison tables, cluster summaries, snippet tables
-- **PNG** — PCA sweep plot
-- **JSON** — full configuration snapshot
-- **TXT** — human-readable hyperparameters file
+- **results.txt** — human-readable report (sections configurable via Report Settings)
+- **config.json** — complete configuration snapshot for reproducibility
+- **results.pkl** — full result object for further analysis in Python
+- **replication_script.py** — standalone script to reproduce the analysis using the `ssdiff` library
 
 ---
 
@@ -199,32 +213,43 @@ Multiple runs can be saved and compared using the run selector. Results can be e
 ```
 SSD_APP/
 ├── run.py                          # Application entry point
-├── requirements.txt                # Python dependencies
+├── pyproject.toml                  # Project metadata and dependencies
+├── requirements.txt                # pip dependencies
 ├── SSD.spec                        # PyInstaller build configuration
 │
-└── ssdiff_gui/                     # Main package
-    ├── main.py                     # App initialization
-    ├── models/
-    │   └── project.py              # Data models and configuration dataclasses
-    ├── controllers/
-    │   ├── ssd_runner.py           # SSD analysis execution
-    │   └── export_controller.py    # Result export (DOCX, CSV, PNG, JSON, TXT)
-    ├── views/
-    │   ├── main_window.py          # Main application window
-    │   ├── stage1_setup.py         # Stage 1: Setup
-    │   ├── stage2_concept.py       # Stage 2: Concept definition & run
-    │   ├── stage3_results.py       # Stage 3: Results viewer
-    │   ├── appearance_dialog.py    # Theme and font customization
-    │   ├── settings_dialog.py      # Application settings
-    │   ├── tutorial_dialog.py      # In-app tutorial
-    │   └── widgets/                # Reusable UI components
-    ├── utils/
-    │   ├── file_io.py              # Project save/load
-    │   ├── validators.py           # Input validation
-    │   └── worker_threads.py       # Background workers
-    └── resources/
-        ├── styles.qss              # Application stylesheet
-        └── quotes.json             # Loading screen quotes
+├── ssdiff_gui/                     # Main package
+│   ├── main.py                     # App initialization and single-instance guard
+│   ├── theme.py                    # Centralized theme system (8 themes)
+│   ├── logo.py                     # Theme-aware icon generation
+│   ├── models/
+│   │   └── project.py              # Data models, config dataclasses, replication script generation
+│   ├── controllers/
+│   │   └── ssd_runner.py           # SSD analysis execution (background thread)
+│   ├── views/
+│   │   ├── main_window.py          # Main application window and project management
+│   │   ├── stage1_setup.py         # Stage 1: Data, preprocessing, embeddings
+│   │   ├── stage2_concept.py       # Stage 2: Concept definition, backend, run
+│   │   ├── stage3_results.py       # Stage 3: Results viewer and export
+│   │   ├── appearance_dialog.py    # Theme and font customization
+│   │   ├── settings_dialog.py      # Application settings
+│   │   ├── report_settings_dialog.py  # Report output configuration
+│   │   ├── tutorial_dialog.py      # In-app tutorial
+│   │   └── widgets/                # Reusable UI components
+│   ├── utils/
+│   │   ├── file_io.py              # Project save/load (JSON + pickle)
+│   │   ├── validators.py           # Input validation
+│   │   ├── worker_threads.py       # Background workers (preprocessing, embedding loading)
+│   │   ├── settings.py             # QSettings wrapper
+│   │   ├── report_settings.py      # Report configuration persistence
+│   │   ├── paths.py                # Cross-platform path management
+│   │   └── linux_install.py        # Desktop integration on Linux
+│   └── resources/
+│       ├── styles.qss              # Application stylesheet
+│       └── quotes.json             # Loading screen quotes
+│
+├── tests/                          # Test suite
+├── docs/                           # Logo assets (SVG)
+└── .github/workflows/              # CI (tests) and CD (cross-platform builds)
 ```
 
 ---
@@ -233,15 +258,13 @@ SSD_APP/
 
 | Package | Purpose |
 |---------|---------|
-| [PySide6](https://doc.qt.io/qtforpython-6/) | GUI framework |
 | [ssdiff](https://github.com/hplisiecki/Supervised-Semantic-Differential) | Core SSD analysis engine |
-| [spaCy](https://spacy.io/) | Text preprocessing and lemmatization |
-| [gensim](https://radimrehurek.com/gensim/) | Word embedding loading and management |
-| [scikit-learn](https://scikit-learn.org/) | PCA, K-means clustering, metrics |
-| [pandas](https://pandas.pydata.org/) | Data manipulation |
-| [numpy](https://numpy.org/) / [scipy](https://scipy.org/) | Numerical computation |
-| [python-docx](https://python-docx.readthedocs.io/) | Word document generation |
-| [matplotlib](https://matplotlib.org/) / [seaborn](https://seaborn.pydata.org/) | Visualization |
+| [PySide6](https://doc.qt.io/qtforpython-6/) | GUI framework |
+| [pandas](https://pandas.pydata.org/) | Data loading and manipulation |
+| [numpy](https://numpy.org/) | Numerical computation |
+| [openpyxl](https://openpyxl.readthedocs.io/) | Excel file support |
+
+The `ssdiff` package brings in its own dependencies (spaCy, numpy, matplotlib).
 
 ---
 
@@ -266,16 +289,12 @@ If you use SSD in your research, please cite:
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
-
-Some dependencies are distributed under the LGPL — see the [LICENSES/](LICENSES/) directory for details.
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
 
 ## Questions / Contributions
-- File issues and feature requests on the repo’s Issues page.
-- Pull requests welcome — especially for:
-  - Documentation improvements
+- File issues and feature requests on the repo's Issues page.
+- Pull requests welcome — especially for documentation improvements.
 
 Contact: hplisiecki@gmail.com
 
 Project was funded by the National Science Centre, Poland (grant no. 2020/38/E/HS6/00302).
-

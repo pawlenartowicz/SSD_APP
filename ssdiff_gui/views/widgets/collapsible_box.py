@@ -4,10 +4,9 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QToolButton,
-    QFrame,
     QSizePolicy,
 )
-from PySide6.QtCore import Qt, QPropertyAnimation, QParallelAnimationGroup
+from PySide6.QtCore import Qt, QPropertyAnimation
 
 
 class CollapsibleBox(QWidget):
@@ -31,7 +30,7 @@ class CollapsibleBox(QWidget):
         self.content_area = QWidget()
         self.content_area.setMaximumHeight(0)
         self.content_area.setMinimumHeight(0)
-        self.content_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.content_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         # Content layout (users add widgets to this)
         self.content_layout = QVBoxLayout()
@@ -64,12 +63,18 @@ class CollapsibleBox(QWidget):
         self.toggle_button.setArrowType(Qt.DownArrow)
         self.toggle_button.setChecked(True)
 
-        # Calculate content height
+        # Animate to estimated height, then uncap so layout can size naturally
         content_height = self.content_layout.sizeHint().height() + 20
 
         self.animation.setStartValue(0)
         self.animation.setEndValue(content_height)
+        self.animation.finished.connect(self._uncap_height)
         self.animation.start()
+
+    def _uncap_height(self):
+        """Remove the maximum height constraint after expand animation."""
+        self.animation.finished.disconnect(self._uncap_height)
+        self.content_area.setMaximumHeight(16777215)
 
     def collapse(self):
         """Collapse the content area."""

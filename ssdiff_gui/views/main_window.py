@@ -11,22 +11,20 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QLabel,
     QPushButton,
-    QMenuBar,
-    QMenu,
     QMessageBox,
     QFileDialog,
     QInputDialog,
     QStatusBar,
     QFrame,
-    QSizePolicy,
     QApplication,
 )
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtCore import Qt, Signal, QSettings, QTimer
+from PySide6.QtCore import Qt, Signal, QTimer
 
-from ssdiff_gui import __version__
+from ssdiff_gui import __version__, __ssdiff_version__
 from ..models.project import Project
 from ..utils.file_io import ProjectIO
+from ..utils.settings import app_settings
 
 
 class MainWindow(QMainWindow):
@@ -39,7 +37,7 @@ class MainWindow(QMainWindow):
         self.project = None
         self.current_stage = 0
 
-        self._settings = QSettings("SSD", "SSD")
+        self._settings = app_settings()
 
         self._init_ui()
         self._create_menus()
@@ -150,11 +148,10 @@ class MainWindow(QMainWindow):
 
     def _update_stage_nav_bar(self):
         """Update the visual state of the stage navigation bar."""
-        stage_labels = ["Setup", "Run", "Results"]
         for i, btn in enumerate(self._stage_btns):
             stage_num = i + 1
             is_current = (stage_num == self.current_stage)
-            is_enabled = btn.isEnabled()
+            btn.isEnabled()
 
             if is_current:
                 btn.setObjectName("stage_step_active")
@@ -173,11 +170,11 @@ class MainWindow(QMainWindow):
         """Navigate back to the welcome page, closing the current project."""
         if self.project:
             # Warn about unsaved analysis run
-            if self.stage3_widget.has_unsaved_run():
+            if self.stage3_widget.has_unsaved_result():
                 reply = QMessageBox.warning(
                     self,
-                    "Unsaved Analysis Run",
-                    "You have an unsaved analysis run.\n"
+                    "Unsaved Result",
+                    "You have an unsaved result.\n"
                     "If you return to the main menu, it will be discarded.\n\n"
                     "Go back to save it?",
                     QMessageBox.Yes | QMessageBox.No,
@@ -186,22 +183,22 @@ class MainWindow(QMainWindow):
                     self.go_to_stage(3)
                     return
 
-            # Ask to save project before closing
-            reply = QMessageBox.question(
-                self,
-                "Return to Main Menu?",
-                "Do you want to save the project before returning to the main menu?",
-                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
-            )
-
-            if reply == QMessageBox.Save:
-                self.save_project()
-                self._close_project()
-            elif reply == QMessageBox.Discard:
-                self._close_project()
+            if self.project._dirty:
+                reply = QMessageBox.question(
+                    self,
+                    "Return to Main Menu?",
+                    "Do you want to save the project before returning to the main menu?",
+                    QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                )
+                if reply == QMessageBox.Save:
+                    self.save_project()
+                    self._close_project()
+                elif reply == QMessageBox.Discard:
+                    self._close_project()
+                else:
+                    return
             else:
-                # Cancel - don't navigate away
-                return
+                self._close_project()
 
         self.stage_stack.setCurrentWidget(self.welcome_page)
         self.current_stage = 0
@@ -219,21 +216,15 @@ class MainWindow(QMainWindow):
         self.view_menu.menuAction().setVisible(False)
 
         # Reset stage widgets
-        self.stage1_widget.project = None
-        self.stage1_widget._df = None
-        self.stage1_widget._update_ready_indicator()
-
-        self.stage2_widget.project = None
-
-        self.stage3_widget.project = None
-        self.stage3_widget.current_run = None
-        self.stage3_widget._unsaved_run = None
-        self.stage3_widget._is_viewing_unsaved = False
+        self.stage1_widget.reset()
+        self.stage2_widget.reset()
+        self.stage3_widget.reset()
 
         # Reset nav bar buttons
         for btn in self._stage_btns:
             btn.setEnabled(False)
 
+        self._update_title()
         self.status_bar.showMessage("Welcome to SSD")
 
     def _create_menus(self):
@@ -390,7 +381,10 @@ class MainWindow(QMainWindow):
 
         # Version label
         layout.addSpacing(40)
-        version_label = QLabel(f"v{__version__}")
+        version_text = f"v{__version__}"
+        if __ssdiff_version__:
+            version_text += f"  •  based on SSDiff v{__ssdiff_version__}"
+        version_label = QLabel(version_text)
         version_label.setObjectName("label_muted")
         version_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(version_label)
@@ -430,7 +424,7 @@ class MainWindow(QMainWindow):
         # Stage 3
         self.stage3_widget = Stage3Widget()
         self.stage3_widget.new_run_requested.connect(self._on_new_run_requested)
-        self.stage3_widget.run_saved.connect(self._on_run_saved)
+        self.stage3_widget.result_saved.connect(self._on_result_saved)
         self.stage_stack.addWidget(self.stage3_widget)
 
     def new_project(self):
@@ -501,13 +495,19 @@ class MainWindow(QMainWindow):
         if not project_path_str:
             return
 
+        # Walk upward to find the directory containing project.json
         project_path = Path(project_path_str)
-
-        if not (project_path / "project.json").exists():
+        candidate = project_path
+        while candidate != candidate.parent:
+            if (candidate / "project.json").exists():
+                project_path = candidate
+                break
+            candidate = candidate.parent
+        else:
             QMessageBox.critical(
                 self,
                 "Invalid Project Folder",
-                f"No project.json found in the selected folder:\n{project_path}",
+                f"No project.json found in or above:\n{project_path_str}",
             )
             return
 
@@ -533,6 +533,8 @@ class MainWindow(QMainWindow):
             self.stage1_widget.save_to_project(self.project)
 
             ProjectIO.save_project(self.project)
+            self.project.mark_clean()
+            self._update_title()
             self.status_bar.showMessage("Project saved")
 
         except Exception as e:
@@ -560,14 +562,14 @@ class MainWindow(QMainWindow):
             return
 
         # Determine which stage to show
-        if self.project.runs:
+        if self.project.results:
             # Has runs - show results
             self.stage2_action.setEnabled(True)
             self.stage3_action.setEnabled(True)
             self.stage2_widget.load_project(self.project)
             self.stage3_widget.load_project(self.project)
             self.go_to_stage(3)
-        elif self.project.ready_for_runs:
+        elif self.project.stage1_ready:
             # Ready for runs - show stage 2
             self.stage2_action.setEnabled(True)
             self.go_to_stage(2)
@@ -585,10 +587,17 @@ class MainWindow(QMainWindow):
             self.stage1_widget._progress_dialog.set_complete("Project loaded.")
             self.stage1_widget._progress_dialog.accept()
 
+        self._update_title()
         self.project_changed.emit(self.project)
 
     def go_to_stage(self, stage: int):
         """Navigate to a specific stage."""
+        # Save state of the stage we're leaving
+        if self.project and self.current_stage == 2:
+            self.stage2_widget._save_config_to_project()
+            self.project.mark_dirty()
+            self._update_title()
+
         if stage == 1:
             self.stage_stack.setCurrentWidget(self.stage1_widget)
             self.current_stage = 1
@@ -614,44 +623,49 @@ class MainWindow(QMainWindow):
             return
 
         self.stage1_action.setEnabled(True)
-        self.stage2_action.setEnabled(self.project.ready_for_runs)
-        has_results = bool(self.project.runs) or self.stage3_widget.has_unsaved_run()
+        self.stage2_action.setEnabled(self.project.stage1_ready)
+        has_results = bool(self.project.results) or self.stage3_widget.has_unsaved_result()
         self.stage3_action.setEnabled(has_results)
 
         # Sync nav bar buttons
         self._stage_btns[0].setEnabled(True)
-        self._stage_btns[1].setEnabled(self.project.ready_for_runs)
+        self._stage_btns[1].setEnabled(self.project.stage1_ready)
         self._stage_btns[2].setEnabled(has_results)
 
         self._update_stage_nav_bar()
+
+    def _update_title(self):
+        if self.project:
+            dirty_marker = "*" if self.project._dirty else ""
+            self.setWindowTitle(f"{self.project.name}{dirty_marker} — SSD")
+        else:
+            self.setWindowTitle("SSD - Supervised Semantic Differential")
 
     def _on_stage1_complete(self):
         """Handle Stage 1 completion."""
         if not self.project:
             return
 
-        self.project.update_ready_state()
-
-        if self.project.ready_for_runs:
+        if self.project.stage1_ready:
             self.stage2_action.setEnabled(True)
             self.go_to_stage(2)
 
             self.status_bar.showMessage("Stage 1 complete - Ready to run analysis")
 
-    def _on_run_requested(self, concept_config):
+    def _on_run_requested(self):
         """Handle run request from Stage 2."""
         if not self.project:
             return
 
         # Pre-run validation — catch obvious issues before starting the runner
-        if self.project._cached_docs is None:
+        if self.project._docs is None:
             QMessageBox.warning(
                 self, "Missing Data",
                 "No documents loaded. Please go back to Setup and load a dataset.",
             )
             return
 
-        if self.project._cached_kv is None:
+        if self.project._kv is None:
             QMessageBox.warning(
                 self, "Missing Embeddings",
                 "No word embeddings loaded.\n\n"
@@ -659,15 +673,15 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if concept_config.analysis_type == "continuous":
-            if self.project._cached_y is None:
+        if self.project.analysis_type in ("pls", "pca_ols"):
+            if self.project._y is None:
                 QMessageBox.warning(
                     self, "Missing Outcome",
                     "No outcome variable loaded. Please select an outcome column in Setup.",
                 )
                 return
-        elif concept_config.analysis_type == "crossgroup":
-            if self.project._cached_groups is None:
+        elif self.project.analysis_type == "groups":
+            if self.project._groups is None:
                 QMessageBox.warning(
                     self, "Missing Groups",
                     "No group variable loaded. Please select a group column in Setup.",
@@ -678,7 +692,7 @@ class MainWindow(QMainWindow):
         from ..controllers.ssd_runner import SSDRunner
 
         # Create and start the runner
-        self.runner = SSDRunner(self.project, concept_config)
+        self.runner = SSDRunner(self.project)
         self.runner.progress.connect(self._on_run_progress)
         self.runner.finished.connect(self._on_run_finished)
         self.runner.error.connect(self._on_run_error)
@@ -701,18 +715,29 @@ class MainWindow(QMainWindow):
             if "PCA sweep" in message:
                 self.progress_dialog.start_faux_progress(15, 40, message)
 
-    def _on_run_finished(self, run):
+    def _on_run_finished(self, result):
         """Handle run completion — show as unsaved, don't persist yet."""
         if hasattr(self, 'progress_dialog') and self.progress_dialog.is_cancelled():
             return
 
-        # Set up Stage 3 BEFORE closing the dialog so the UI is fully
-        # rendered behind it and there's no flash of stale content.
-        self.stage3_action.setEnabled(True)
-        self.stage3_widget.load_project(self.project)
-        self.stage3_widget.show_unsaved_run(run)
-        self.go_to_stage(3)
-        QApplication.processEvents()  # let UI paint behind dialog
+        try:
+            if self.project:
+                self.project.mark_dirty()
+
+            # Set up Stage 3 BEFORE closing the dialog so the UI is fully
+            # rendered behind it and there's no flash of stale content.
+            self.stage3_action.setEnabled(True)
+            self.stage3_widget.load_project(self.project)
+            self.stage3_widget.show_unsaved_result(result)
+            self.go_to_stage(3)
+            QApplication.processEvents()  # let UI paint behind dialog
+        except Exception:
+            import traceback
+            if hasattr(self, 'progress_dialog'):
+                self.progress_dialog.set_error(
+                    f"Failed to display results:\n\n{traceback.format_exc()}"
+                )
+            return
 
         # NOW close the dialog
         if hasattr(self, 'progress_dialog'):
@@ -720,12 +745,14 @@ class MainWindow(QMainWindow):
             self.progress_dialog.accept()
 
         self.status_bar.showMessage(
-            f"Analysis complete - Run ID: {run.run_id}  (unsaved)"
+            f"Analysis complete — Result ID: {result.result_id}  (unsaved)"
         )
 
-    def _on_run_saved(self):
-        """Handle the run_saved signal from Stage 3."""
-        self.status_bar.showMessage("Run saved to archive")
+    def _on_result_saved(self):
+        """Handle the result_saved signal from Stage 3."""
+        self.status_bar.showMessage("Result saved")
+        if self.project:
+            self.project.mark_dirty()
 
     def _on_run_error(self, error_message: str):
         """Handle run error."""
@@ -795,12 +822,14 @@ class MainWindow(QMainWindow):
 
     def show_about(self):
         """Show the about dialog."""
+        ssdiff_line = f"<p>Based on SSDiff v{__ssdiff_version__}</p>" if __ssdiff_version__ else ""
         QMessageBox.about(
             self,
             "About SSD",
             "<h2>SSD</h2>"
             "<p>Supervised Semantic Differential</p>"
             f"<p>Version {__version__}</p>"
+            f"{ssdiff_line}"
             "<p>A desktop application for running Supervised Semantic "
             "Differential analysis on text data.</p>"
             "<p>Designed for psychologists and researchers working with "
@@ -859,11 +888,11 @@ class MainWindow(QMainWindow):
         """Handle window close event."""
         if self.project:
             # Warn about unsaved analysis run
-            if self.stage3_widget.has_unsaved_run():
+            if self.stage3_widget.has_unsaved_result():
                 reply = QMessageBox.warning(
                     self,
-                    "Unsaved Analysis Run",
-                    "You have an unsaved analysis run.\n"
+                    "Unsaved Result",
+                    "You have an unsaved result.\n"
                     "If you close now, it will be discarded.\n\n"
                     "Go back to save it?",
                     QMessageBox.Yes | QMessageBox.No,
@@ -873,22 +902,25 @@ class MainWindow(QMainWindow):
                     event.ignore()
                     return
 
-            reply = QMessageBox.question(
-                self,
-                "Save Project?",
-                "Do you want to save the project before closing?",
-                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
-            )
-
-            if reply == QMessageBox.Save:
-                self.save_project()
-                self._save_window_geometry()
-                event.accept()
-            elif reply == QMessageBox.Discard:
-                self._save_window_geometry()
-                event.accept()
+            if self.project._dirty:
+                reply = QMessageBox.question(
+                    self,
+                    "Save Project?",
+                    "Do you want to save the project before closing?",
+                    QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                )
+                if reply == QMessageBox.Save:
+                    self.save_project()
+                    self._save_window_geometry()
+                    event.accept()
+                elif reply == QMessageBox.Discard:
+                    self._save_window_geometry()
+                    event.accept()
+                else:
+                    event.ignore()
             else:
-                event.ignore()
+                self._save_window_geometry()
+                event.accept()
         else:
             self._save_window_geometry()
             event.accept()

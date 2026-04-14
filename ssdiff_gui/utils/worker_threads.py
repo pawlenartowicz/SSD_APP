@@ -1,31 +1,38 @@
 """Background worker threads for SSD."""
 
 from PySide6.QtCore import QThread, Signal
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Any, Optional, Union
 from pathlib import Path
 import os
-import sys
+import ssl
+
+
+def _urlopen(req, *, timeout=30):
+    """urlopen wrapper that falls back to unverified SSL on cert errors.
+
+    PyInstaller bundles can't always find system CA certificates,
+    especially after OS updates.  These requests only fetch public
+    spaCy models and GitHub release metadata, so falling back to
+    unverified SSL is acceptable.
+    """
+    from urllib.request import urlopen
+    from urllib.error import URLError
+    try:
+        return urlopen(req, timeout=timeout)
+    except URLError as e:
+        if "CERTIFICATE_VERIFY_FAILED" in str(e):
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            return urlopen(req, timeout=timeout, context=ctx)
+        raise
 
 
 def get_spacy_models_dir() -> Path:
-    """Return the directory for locally-downloaded spaCy models.
+    """Return the directory for locally-downloaded spaCy models."""
+    from .paths import get_app_data_dir
 
-    Uses platform-appropriate data directories:
-    - Windows: ``%LOCALAPPDATA%/SSD/spacy_models``
-    - macOS:   ``~/Library/Application Support/SSD/spacy_models``
-    - Linux:   ``~/.local/share/SSD/spacy_models``
-    """
-    if sys.platform == "win32":
-        local_appdata = os.environ.get("LOCALAPPDATA")
-        if local_appdata:
-            base = Path(local_appdata) / "SSD"
-        else:
-            base = Path.home() / "AppData" / "Local" / "SSD"
-    elif sys.platform == "darwin":
-        base = Path.home() / "Library" / "Application Support" / "SSD"
-    else:
-        base = Path.home() / ".local" / "share" / "SSD"
-    models_dir = base / "spacy_models"
+    models_dir = get_app_data_dir() / "spacy_models"
     models_dir.mkdir(parents=True, exist_ok=True)
     return models_dir
 
@@ -61,6 +68,7 @@ class PreprocessWorker(QThread):
         language: str,
         model: str,
         model_path: Optional[Path] = None,
+        stopwords_override=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -68,6 +76,7 @@ class PreprocessWorker(QThread):
         self.language = language
         self.model = model
         self.model_path = model_path
+        self.stopwords_override = stopwords_override  # None=default, []=none, [words]=custom
         self._is_cancelled = False
 
     def cancel(self):
@@ -77,7 +86,7 @@ class PreprocessWorker(QThread):
     def run(self):
         """Execute preprocessing in background thread."""
         try:
-            from ssdiff import (
+            from ssdiff.utils.text import (
                 load_spacy,
                 load_stopwords,
                 preprocess_texts,
@@ -98,7 +107,10 @@ class PreprocessWorker(QThread):
                 return
 
             self.progress.emit(15, "Loading stopwords...")
-            stopwords = load_stopwords(self.language)
+            if self.stopwords_override is not None:
+                stopwords = self.stopwords_override
+            else:
+                stopwords = load_stopwords(self.language)
 
             if self._is_cancelled:
                 return
@@ -135,7 +147,7 @@ class PreprocessWorker(QThread):
         Handles both flat (PreprocessedDoc) and grouped (PreprocessedProfile)
         outputs from ssdiff.preprocess_texts().
         """
-        from ssdiff.preprocess import PreprocessedProfile
+        from ssdiff.utils.text import PreprocessedProfile
 
         is_grouped = pre_docs and isinstance(pre_docs[0], PreprocessedProfile)
 
@@ -197,100 +209,180 @@ class PreprocessWorker(QThread):
             }
 
 
-class EmbeddingWorker(QThread):
-    """Worker thread for loading and normalizing embeddings."""
+class EmbeddingPrepareWorker(QThread):
+    """Worker thread for preparing embeddings: load -> normalize -> save .ssdembed.
 
-    progress = Signal(int, str)  # percent, message
-    finished = Signal(object, dict)  # kv, stats
+    Does NOT keep the embedding in RAM — caller decides whether to load it
+    after saving. Emits the path to the saved .ssdembed file.
+    """
+
+    progress = Signal(int, str)
+    finished = Signal(str, dict)  # saved_path, metadata
     error = Signal(str)
 
     def __init__(
         self,
-        embedding_path: Path,
+        source_path: Path,
+        output_dir: Path,
         l2_normalize: bool = True,
-        abtt_enabled: bool = True,
-        abtt_m: int = 1,
+        abtt_m: int = 0,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.source_path = source_path
+        self.output_dir = output_dir
+        self.l2_normalize = l2_normalize
+        self.abtt_m = abtt_m
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    def run(self):
+        try:
+            from ssdiff import Embeddings
+
+            self.progress.emit(10, "Loading embeddings file...")
+            emb = Embeddings.load(str(self.source_path))
+
+            if self._is_cancelled:
+                return
+
+            # Check if source already has matching normalization
+            source_l2 = emb.l2_normalized
+            source_abtt = emb.abtt_m
+            needs_normalize = (
+                (self.l2_normalize and not source_l2) or
+                (self.abtt_m > source_abtt)
+            )
+
+            if needs_normalize:
+                self.progress.emit(40, "Normalizing embeddings...")
+                emb.normalize(l2=self.l2_normalize, abtt_m=self.abtt_m)
+            else:
+                self.progress.emit(40, "Normalization already applied.")
+
+            if self._is_cancelled:
+                return
+
+            # Build output filename stem: {stem}[_l2][_abtt{m}]
+            # Note: Embeddings.save() appends ".ssdembed" automatically
+            stem = self.source_path.stem
+            # Remove existing _l2/_abtt suffixes to avoid stacking
+            import re
+            stem = re.sub(r"(_l2)?(_abtt\d+)?$", "", stem)
+
+            suffix_parts = []
+            if emb.l2_normalized:
+                suffix_parts.append("l2")
+            abtt_val = emb.abtt_m
+            if abtt_val > 0:
+                suffix_parts.append(f"abtt{abtt_val}")
+            suffix = "_" + "_".join(suffix_parts) if suffix_parts else ""
+            out_stem = f"{stem}{suffix}"
+
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            out_stem_path = str(self.output_dir / out_stem)
+
+            self.progress.emit(70, "Saving prepared embedding...")
+            # save() appends ".ssdembed" to the stem
+            emb.save(out_stem_path)
+
+            # The actual file is at out_stem_path + ".ssdembed"
+            out_path = Path(out_stem_path + ".ssdembed")
+            out_name = out_path.name
+
+            if self._is_cancelled:
+                return
+
+            # Collect metadata (include sidecar size)
+            sidecar = Path(str(out_path) + ".vectors.npy")
+            total_bytes = out_path.stat().st_size
+            if sidecar.exists():
+                total_bytes += sidecar.stat().st_size
+            meta = {
+                "filename": out_name,
+                "vocab_size": len(emb),
+                "embedding_dim": emb.vector_size,
+                "l2_normalized": emb.l2_normalized,
+                "abtt_m": emb.abtt_m,
+                "file_size_mb": total_bytes / (1024 * 1024),
+            }
+
+            # Explicitly delete to free RAM
+            del emb
+
+            self.progress.emit(100, "Complete!")
+            self.finished.emit(str(out_path), meta)
+
+        except Exception as e:
+            import traceback
+            self.error.emit(f"Failed to prepare embeddings: {str(e)}\n{traceback.format_exc()}")
+
+
+class EmbeddingLoadWorker(QThread):
+    """Worker thread for loading a prepared .ssdembed file into RAM."""
+
+    progress = Signal(int, str)
+    finished = Signal(object, dict)  # Embeddings object, coverage_stats
+    error = Signal(str)
+
+    def __init__(
+        self,
+        ssdembed_path: Path,
         docs: Optional[List[List[str]]] = None,
         parent=None,
     ):
         super().__init__(parent)
-        self.embedding_path = embedding_path
-        self.l2_normalize = l2_normalize
-        self.abtt_enabled = abtt_enabled
-        self.abtt_m = abtt_m
+        self.ssdembed_path = ssdembed_path
         self.docs = docs
         self._is_cancelled = False
 
     def cancel(self):
-        """Request cancellation of embedding loading."""
         self._is_cancelled = True
 
     def run(self):
-        """Execute embedding loading in background thread."""
         try:
-            from ssdiff import load_embeddings, normalize_kv
+            from ssdiff import Embeddings
 
-            self.progress.emit(10, "Loading embeddings file...")
-            kv = load_embeddings(str(self.embedding_path))
-
-            if self._is_cancelled:
-                return
-
-            self.progress.emit(50, "Normalizing embeddings...")
-            abtt_m = self.abtt_m if self.abtt_enabled else 0
-            kv = normalize_kv(kv, l2=self.l2_normalize, abtt_m=abtt_m)
+            self.progress.emit(20, "Loading prepared embedding...")
+            emb = Embeddings.load(str(self.ssdembed_path))
 
             if self._is_cancelled:
                 return
 
-            self.progress.emit(80, "Computing coverage statistics...")
-            stats = self._compute_coverage(kv)
+            self.progress.emit(70, "Computing coverage statistics...")
+            stats = {
+                "vocab_size": len(emb),
+                "embedding_dim": emb.vector_size,
+                "l2_normalized": emb.l2_normalized,
+                "abtt_m": emb.abtt_m,
+            }
+
+            if self.docs:
+                # Embeddings.key_to_index is a dict[str, int]
+                vocab_set = set(emb.key_to_index.keys())
+                all_tokens = set()
+                is_grouped = self.docs and self.docs[0] and isinstance(self.docs[0][0], list)
+                if is_grouped:
+                    for profile in self.docs:
+                        for post in profile:
+                            all_tokens.update(post)
+                else:
+                    for doc in self.docs:
+                        all_tokens.update(doc)
+
+                in_vocab = all_tokens & vocab_set
+                oov = all_tokens - vocab_set
+                stats["coverage_pct"] = len(in_vocab) / len(all_tokens) * 100 if all_tokens else 0
+                stats["n_oov"] = len(oov)
 
             self.progress.emit(100, "Complete!")
-            self.finished.emit(kv, stats)
+            self.finished.emit(emb, stats)
 
         except Exception as e:
             import traceback
-            self.error.emit(f"Failed to load embeddings: {str(e)}\n{traceback.format_exc()}")
-
-    def _compute_coverage(self, kv) -> dict:
-        """Compute vocabulary coverage statistics.
-
-        Handles both flat (List[List[str]]) and grouped
-        (List[List[List[str]]]) doc formats.
-        """
-        vocab_size = len(kv.key_to_index)
-        embedding_dim = kv.vector_size
-
-        stats = {
-            "vocab_size": vocab_size,
-            "embedding_dim": embedding_dim,
-        }
-
-        # Compute coverage against docs if available
-        if self.docs:
-            vocab_set = set(kv.key_to_index.keys())
-            all_tokens = set()
-
-            # Detect grouped vs flat by checking first element
-            is_grouped = self.docs and self.docs[0] and isinstance(self.docs[0][0], list)
-            if is_grouped:
-                for profile in self.docs:
-                    for post in profile:
-                        all_tokens.update(post)
-            else:
-                for doc in self.docs:
-                    all_tokens.update(doc)
-
-            in_vocab = all_tokens & vocab_set
-            oov = all_tokens - vocab_set
-
-            stats["doc_vocab_size"] = len(all_tokens)
-            stats["in_vocab"] = len(in_vocab)
-            stats["oov"] = len(oov)
-            stats["coverage_pct"] = len(in_vocab) / len(all_tokens) * 100 if all_tokens else 0
-
-        return stats
+            self.error.emit(f"Failed to load embedding: {str(e)}\n{traceback.format_exc()}")
 
 
 class SpacyDownloadWorker(QThread):
@@ -314,7 +406,7 @@ class SpacyDownloadWorker(QThread):
         import zipfile
         import tempfile
         import shutil
-        from urllib.request import urlopen, Request
+        from urllib.request import Request
         from urllib.error import URLError
 
         try:
@@ -332,7 +424,7 @@ class SpacyDownloadWorker(QThread):
                 "/master/compatibility.json"
             )
             req = Request(compat_url, headers={"User-Agent": "SSD-App/1.0"})
-            with urlopen(req, timeout=30) as resp:
+            with _urlopen(req, timeout=30) as resp:
                 compat = json.loads(resp.read().decode("utf-8"))
 
             # 2. Look up model version
@@ -366,7 +458,7 @@ class SpacyDownloadWorker(QThread):
             )
 
             req = Request(download_url, headers={"User-Agent": "SSD-App/1.0"})
-            with urlopen(req, timeout=60) as resp:
+            with _urlopen(req, timeout=60) as resp:
                 total = resp.headers.get("Content-Length")
                 total = int(total) if total else None
 
@@ -452,13 +544,13 @@ class UpdateCheckWorker(QThread):
         self.current_version = current_version
 
     def run(self):
-        from urllib.request import urlopen, Request
+        from urllib.request import Request
         import json
 
         api_url = "https://api.github.com/repos/hplisiecki/SSD_APP/releases/latest"
         try:
             req = Request(api_url, headers={"User-Agent": "SSD-App/1.0"})
-            with urlopen(req, timeout=10) as resp:
+            with _urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
 
             tag = data.get("tag_name", "").lstrip("v")
@@ -475,28 +567,6 @@ class UpdateCheckWorker(QThread):
         except Exception:
             pass  # silent — no internet, rate-limited, etc.
 
-
-class KvConvertWorker(QThread):
-    """Worker thread for saving embeddings in .kv format."""
-
-    progress = Signal(int, str)
-    finished = Signal(str)   # kv_path
-    error = Signal(str)
-
-    def __init__(self, kv, kv_path: str, parent=None):
-        super().__init__(parent)
-        self.kv = kv
-        self.kv_path = kv_path
-
-    def run(self):
-        try:
-            self.progress.emit(10, "Saving .kv format...")
-            self.kv.save(self.kv_path)
-            self.progress.emit(100, "Done!")
-            self.finished.emit(self.kv_path)
-        except Exception as e:
-            import traceback
-            self.error.emit(f"Failed to save .kv file: {str(e)}\n{traceback.format_exc()}")
 
 
 class CoverageWorker(QThread):
@@ -521,7 +591,7 @@ class CoverageWorker(QThread):
     def run(self):
         """Compute coverage statistics."""
         try:
-            from ssdiff import coverage_by_lexicon
+            from ssdiff.utils.lexicon import coverage_by_lexicon
 
             self.progress.emit(50, "Computing coverage...")
 
@@ -536,5 +606,4 @@ class CoverageWorker(QThread):
             self.finished.emit(summary, per_token_df)
 
         except Exception as e:
-            import traceback
             self.error.emit(f"Coverage computation failed: {str(e)}")

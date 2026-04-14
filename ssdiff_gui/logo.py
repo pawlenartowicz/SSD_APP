@@ -380,7 +380,7 @@ def generate_icns(
     import struct
     from pathlib import Path as _Path
     from PySide6.QtCore import Qt, QBuffer, QIODevice
-    from PySide6.QtGui import QPixmap, QPainter, QImage
+    from PySide6.QtGui import QPixmap, QPainter
 
     if palette is None:
         from .theme import ThemePalette

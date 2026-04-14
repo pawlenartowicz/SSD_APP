@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTextEdit,
     QMessageBox,
-    QFileDialog,
     QHeaderView,
     QSplitter,
     QFrame,
@@ -28,32 +27,65 @@ from PySide6.QtWidgets import (
     QApplication,
     QSizePolicy,
 )
-from PySide6.QtCore import Qt, Signal, QSettings, QEvent, QTimer
+from PySide6.QtCore import Qt, Signal, QEvent, QTimer
 from PySide6.QtGui import QPixmap
 
-from ..models.project import Project, Run
-from ..controllers.export_controller import ExportController
+import numpy as np
+
+from ..models.project import Project, Result
+from ..utils.settings import app_settings
 from .widgets.loading_overlay import LoadingOverlay
 from .widgets.info_button import InfoButton
 from .widgets.removable_delegate import RemovableItemDelegate
+
+
+def _clusters_to_summary(clusters: list[dict], side: str) -> list[dict]:
+    """Transform ssdiff cluster_neighbors() output -> flat summary rows."""
+    rows = []
+    for rank, c in enumerate(clusters, 1):
+        top_words_str = ", ".join(w["word"] for w in c.get("words", [])[:5])
+        rows.append({
+            "cluster_rank": rank,
+            "side": side,
+            "size": c.get("size", 0),
+            "coherence": c.get("coherence", 0.0),
+            "centroid_cos_beta": c.get("centroid_cos_beta", 0.0),
+            "top_words": top_words_str,
+        })
+    return rows
+
+
+def _clusters_to_members(clusters: list[dict], side: str) -> list[dict]:
+    """Transform ssdiff cluster_neighbors() output -> flat member rows."""
+    rows = []
+    for rank, c in enumerate(clusters, 1):
+        for w in c.get("words", []):
+            rows.append({
+                "cluster_rank": rank,
+                "side": side,
+                "word": w["word"],
+                "cos_centroid": w.get("cos_centroid", 0.0),
+                "cos_beta": w.get("cos_beta", 0.0),
+            })
+    return rows
 
 
 class Stage3Widget(QWidget):
     """Stage 3: Results - View and export analysis results."""
 
     new_run_requested = Signal()
-    run_saved = Signal()  # emitted after a run is saved to the archive
+    result_saved = Signal()  # emitted after a result is saved
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.project: Optional[Project] = None
-        self.current_run: Optional[Run] = None
+        self.current_result: Optional[Result] = None
         self._current_snippets: List[Dict] = []
         self._scores_df: Optional[pd.DataFrame] = None
         self._current_contrast_key: Optional[str] = None
 
-        # Unsaved-run tracking
-        self._unsaved_run: Optional[Run] = None
+        # Unsaved-result tracking
+        self._unsaved_result: Optional[Result] = None
         self._is_viewing_unsaved: bool = False
 
         self._setup_ui()
@@ -83,38 +115,33 @@ class Stage3Widget(QWidget):
 
         header_layout.addStretch()
 
-        # Run selector
-        header_layout.addWidget(QLabel("Run:"))
-        self.run_selector = QComboBox()
-        self.run_selector.setMinimumWidth(200)
-        self.run_selector.currentIndexChanged.connect(self._on_run_selected)
-        self._run_delegate = RemovableItemDelegate(
-            self.run_selector,
-            self._delete_run_by_index,
-            is_removable=lambda row: self.run_selector.itemData(row) is not self._unsaved_run,
-            parent=self.run_selector,
+        # Analysis type badge
+        self._analysis_badge = QLabel("")
+        self._analysis_badge.setObjectName("label_badge")
+        self._analysis_badge.setStyleSheet(
+            "QLabel {"
+            "  padding: 3px 10px;"
+            "  border-radius: 4px;"
+            "  font-weight: 600;"
+            "  font-size: 11px;"
+            "}"
         )
-        self.run_selector.setItemDelegate(self._run_delegate)
-        header_layout.addWidget(self.run_selector)
+        self._analysis_badge.hide()
+        header_layout.addWidget(self._analysis_badge)
 
-        # Separator + name field + save button (visible for unsaved runs)
-        self.save_separator = QLabel("  |  ")
-        header_layout.addWidget(self.save_separator)
-
-        self.run_name_input = QLineEdit()
-        self.run_name_input.setPlaceholderText("Enter a name for this run...")
-        self.run_name_input.setMinimumWidth(180)
-        header_layout.addWidget(self.run_name_input)
-
-        self.save_run_btn = QPushButton("Save to Archive")
-        self.save_run_btn.setObjectName("btn_success")
-        self.save_run_btn.clicked.connect(self._save_run_to_archive)
-        header_layout.addWidget(self.save_run_btn)
-
-        # Initially hidden
-        self.save_separator.hide()
-        self.run_name_input.hide()
-        self.save_run_btn.hide()
+        # Result selector
+        header_layout.addWidget(QLabel("Result:"))
+        self.result_selector = QComboBox()
+        self.result_selector.setMinimumWidth(200)
+        self.result_selector.currentIndexChanged.connect(self._on_result_selected)
+        self._run_delegate = RemovableItemDelegate(
+            self.result_selector,
+            self._delete_result_by_index,
+            is_removable=lambda row: self.result_selector.itemData(row) is not self._unsaved_result,
+            parent=self.result_selector,
+        )
+        self.result_selector.setItemDelegate(self._run_delegate)
+        header_layout.addWidget(self.result_selector)
 
         main_layout.addLayout(header_layout)
 
@@ -142,6 +169,8 @@ class Stage3Widget(QWidget):
         self.tabs.addTab(self._create_snippets_tab(), "Beta Snippets")             # 3
         self.tabs.addTab(self._create_poles_tab(), "Semantic Poles")               # 4
         self.tabs.addTab(self._create_scores_tab(), "Document Scores")             # 5
+        self.tabs.addTab(self._create_extreme_docs_tab(), "Extreme Documents")   # 6
+        self.tabs.addTab(self._create_misdiagnosed_tab(), "Misdiagnosed")        # 7
 
         # Per-tab help tooltips — single overlay info button on the tab bar
         self._tab_tooltips = {
@@ -155,8 +184,8 @@ class Stage3Widget(QWidget):
             ),
             1: (
                 "<b>Details</b><br><br>"
-                "Three panels summarising the completed run:<br>"
-                "<b>Run Information</b> — dataset stats, sample counts, and "
+                "Three panels summarising the completed result:<br>"
+                "<b>Result Information</b> — dataset stats, sample counts, and "
                 "model fit statistics (R², p-value, effect sizes).<br>"
                 "<b>Concept Configuration</b> — analysis type, mode, and "
                 "the lexicon words used (if applicable).<br>"
@@ -192,6 +221,20 @@ class Stage3Widget(QWidget):
                 "Each document's cosine similarity to the SSD direction.<br><br>"
                 "Sort by index, score, or outcome value. Click a row to see "
                 "the full document text on the right."
+            ),
+            6: (
+                "<b>Extreme Documents</b><br><br>"
+                "Documents with the highest and lowest cosine alignment "
+                "to the SSD dimension.<br><br>"
+                "Useful for inspecting what content maps to each end "
+                "of the semantic gradient."
+            ),
+            7: (
+                "<b>Misdiagnosed Documents</b><br><br>"
+                "Documents where the model's prediction diverges most "
+                "from the actual outcome value.<br><br>"
+                "<b>Over-predicted</b> — model predicted higher than actual.<br>"
+                "<b>Under-predicted</b> — model predicted lower than actual."
             ),
         }
 
@@ -620,6 +663,80 @@ class Stage3Widget(QWidget):
         return tab
 
     # ------------------------------------------------------------------ #
+    #  Tab 6 — Extreme Documents
+    # ------------------------------------------------------------------ #
+
+    def _create_extreme_docs_tab(self) -> QWidget:
+        """Create the extreme documents tab — highest/lowest scoring docs."""
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        splitter = QSplitter(Qt.Vertical)
+
+        # Highest scoring
+        high_group = QGroupBox("Highest Scoring")
+        high_layout = QVBoxLayout()
+        self._extreme_high_table = QTableWidget()
+        self._extreme_high_table.setAlternatingRowColors(True)
+        self._extreme_high_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._extreme_high_table.setSelectionBehavior(QTableWidget.SelectRows)
+        high_layout.addWidget(self._extreme_high_table)
+        high_group.setLayout(high_layout)
+        splitter.addWidget(high_group)
+
+        # Lowest scoring
+        low_group = QGroupBox("Lowest Scoring")
+        low_layout = QVBoxLayout()
+        self._extreme_low_table = QTableWidget()
+        self._extreme_low_table.setAlternatingRowColors(True)
+        self._extreme_low_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._extreme_low_table.setSelectionBehavior(QTableWidget.SelectRows)
+        low_layout.addWidget(self._extreme_low_table)
+        low_group.setLayout(low_layout)
+        splitter.addWidget(low_group)
+
+        outer.addWidget(splitter, stretch=1)
+        return tab
+
+    # ------------------------------------------------------------------ #
+    #  Tab 7 — Misdiagnosed Documents
+    # ------------------------------------------------------------------ #
+
+    def _create_misdiagnosed_tab(self) -> QWidget:
+        """Create the misdiagnosed documents tab — over/under-predicted docs."""
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        splitter = QSplitter(Qt.Vertical)
+
+        # Over-predicted
+        over_group = QGroupBox("Over-predicted")
+        over_layout = QVBoxLayout()
+        self._misdiag_over_table = QTableWidget()
+        self._misdiag_over_table.setAlternatingRowColors(True)
+        self._misdiag_over_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._misdiag_over_table.setSelectionBehavior(QTableWidget.SelectRows)
+        over_layout.addWidget(self._misdiag_over_table)
+        over_group.setLayout(over_layout)
+        splitter.addWidget(over_group)
+
+        # Under-predicted
+        under_group = QGroupBox("Under-predicted")
+        under_layout = QVBoxLayout()
+        self._misdiag_under_table = QTableWidget()
+        self._misdiag_under_table.setAlternatingRowColors(True)
+        self._misdiag_under_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._misdiag_under_table.setSelectionBehavior(QTableWidget.SelectRows)
+        under_layout.addWidget(self._misdiag_under_table)
+        under_group.setLayout(under_layout)
+        splitter.addWidget(under_group)
+
+        outer.addWidget(splitter, stretch=1)
+        return tab
+
+    # ------------------------------------------------------------------ #
     #  Tab 1 — Configuration / Details
     # ------------------------------------------------------------------ #
 
@@ -632,13 +749,13 @@ class Stage3Widget(QWidget):
         # Horizontal splitter for the three config sections side by side
         config_splitter = QSplitter(Qt.Horizontal)
 
-        run_group = QGroupBox("Run Information")
-        run_layout = QVBoxLayout()
-        self.run_info_text = QTextEdit()
-        self.run_info_text.setReadOnly(True)
-        run_layout.addWidget(self.run_info_text)
-        run_group.setLayout(run_layout)
-        config_splitter.addWidget(run_group)
+        result_group = QGroupBox("Result Information")
+        result_layout = QVBoxLayout()
+        self.result_info_text = QTextEdit()
+        self.result_info_text.setReadOnly(True)
+        result_layout.addWidget(self.result_info_text)
+        result_group.setLayout(result_layout)
+        config_splitter.addWidget(result_group)
 
         self.concept_group = QGroupBox("Concept Configuration")
         concept_layout = QVBoxLayout()
@@ -740,19 +857,29 @@ class Stage3Widget(QWidget):
 
         actions_layout.addStretch()
 
-        export_options_btn = QPushButton("Export Options")
-        export_options_btn.setObjectName("btn_ghost")
-        export_options_btn.setCursor(Qt.PointingHandCursor)
-        export_options_btn.clicked.connect(self._open_export_options)
-        actions_layout.addWidget(export_options_btn)
+        report_settings_btn = QPushButton("Report Settings")
+        report_settings_btn.setObjectName("btn_ghost")
+        report_settings_btn.setCursor(Qt.PointingHandCursor)
+        report_settings_btn.clicked.connect(self._open_report_settings)
+        actions_layout.addWidget(report_settings_btn)
 
-        self.export_btn = QPushButton("Export All Results...")
-        self.export_btn.setMinimumHeight(44)
-        self.export_btn.setMinimumWidth(200)
-        self.export_btn.setObjectName("btn_export")
-        self.export_btn.setCursor(Qt.PointingHandCursor)
-        self.export_btn.clicked.connect(self._export_all)
-        actions_layout.addWidget(self.export_btn)
+        # Save controls (visible for unsaved results)
+        self.run_name_input = QLineEdit()
+        self.run_name_input.setPlaceholderText("Name (optional)")
+        self.run_name_input.setMinimumWidth(160)
+        actions_layout.addWidget(self.run_name_input)
+
+        self.save_result_btn = QPushButton("Save Result")
+        self.save_result_btn.setMinimumHeight(44)
+        self.save_result_btn.setMinimumWidth(200)
+        self.save_result_btn.setObjectName("btn_export")
+        self.save_result_btn.setCursor(Qt.PointingHandCursor)
+        self.save_result_btn.clicked.connect(self._save_result)
+        actions_layout.addWidget(self.save_result_btn)
+
+        # Initially hidden
+        self.run_name_input.hide()
+        self.save_result_btn.hide()
 
         parent_layout.addLayout(actions_layout)
 
@@ -760,99 +887,127 @@ class Stage3Widget(QWidget):
     #  DATA LOADING
     # ================================================================== #
 
-    def _populate_run_selector(self):
-        """Populate the run selector dropdown (archived runs + unsaved if present)."""
-        self.run_selector.blockSignals(True)
-        self.run_selector.clear()
+    def _populate_result_selector(self):
+        """Populate the result selector dropdown (saved results + unsaved if present)."""
+        self.result_selector.blockSignals(True)
+        self.result_selector.clear()
 
-        # If there is an unsaved run, put it first
-        if self._unsaved_run is not None:
-            self.run_selector.addItem("[Unsaved Run]", self._unsaved_run)
+        # If there is an unsaved result, put it first
+        if self._unsaved_result is not None:
+            self.result_selector.addItem("[Unsaved Result]", self._unsaved_result)
 
-        # Archived (saved) runs, newest first
-        if self.project and self.project.runs:
-            for run in reversed(self.project.runs):
-                display_name = run.name or run.run_id
-                label = f"{display_name} ({run.run_id})"
-                if run.status == "error":
+        # Saved results, newest first
+        if self.project and self.project.results:
+            for result in reversed(self.project.results):
+                display_name = result.name or result.result_id
+                label = f"{display_name} ({result.result_id})"
+                if result.status == "error":
                     label += " [ERROR]"
-                self.run_selector.addItem(label, run)
+                self.result_selector.addItem(label, result)
 
-        self.run_selector.blockSignals(False)
+        self.result_selector.blockSignals(False)
 
-        if self.run_selector.count() > 0:
-            self.run_selector.setCurrentIndex(0)
-            self._on_run_selected(0)
+        if self.result_selector.count() > 0:
+            self.result_selector.setCurrentIndex(0)
+            self._on_result_selected(0)
 
-    def _on_run_selected(self, index: int):
-        """Handle run selection change."""
+    def _on_result_selected(self, index: int):
+        """Handle result selection change."""
         if index < 0:
             return
-        run = self.run_selector.itemData(index)
-        if run is None:
+        result = self.result_selector.itemData(index)
+        if result is None:
             return
 
-        # Determine if this is the unsaved run
-        if run is self._unsaved_run:
+        # Determine if this is the unsaved result
+        if result is self._unsaved_result:
             self._is_viewing_unsaved = True
-            self.save_separator.show()
             self.run_name_input.show()
-            self.save_run_btn.show()
+            self.save_result_btn.show()
         else:
             self._is_viewing_unsaved = False
-            self.save_separator.hide()
             self.run_name_input.hide()
-            self.save_run_btn.hide()
+            self.save_result_btn.hide()
 
-        self.show_run(run)
+        self.show_result(result)
 
     # ================================================================== #
-    #  SHOW RUN — main entry point for displaying a run
+    #  SHOW RESULT — main entry point for displaying a result
     # ================================================================== #
 
-    def show_run(self, run: Run):
-        """Display results for a specific run."""
-        self.current_run = run
+    def show_result(self, result: Result):
+        """Display a specific result."""
+        self.current_result = result
         self._current_contrast_key = None
 
-        if not run.results:
+        if not result._result:
             QMessageBox.warning(
                 self, "No Results",
-                "This run does not have results (may have failed).",
+                "This result does not have data (may have failed).",
             )
             return
 
         self._overlay_tabs.start()
         QApplication.processEvents()
 
-        results = run.results
-        is_crossgroup = results.analysis_type == "crossgroup"
+        ssd_result = result._result
+
+        # Re-attach shared project embeddings if missing (stripped during save)
+        if getattr(ssd_result, "embeddings", None) is None and self.project._emb is not None:
+            ssd_result.embeddings = self.project._emb
+
+        is_crossgroup = ssd_result.result_type == "group"
+        is_pca_ols = ssd_result.result_type == "pca_ols"
+
+        # Analysis type badge
+        badge_map = {
+            "pls": ("PLS", "#6c9ce6"),
+            "pca_ols": ("PCA+OLS", "#4ec9a0"),
+            "group": ("Groups", "#e06c8a"),
+        }
+        badge_text, badge_color = badge_map.get(ssd_result.result_type, ("?", "#888"))
+        self._analysis_badge.setText(badge_text)
+        self._analysis_badge.setStyleSheet(
+            f"QLabel {{"
+            f"  padding: 3px 10px;"
+            f"  border-radius: 4px;"
+            f"  font-weight: 600;"
+            f"  font-size: 11px;"
+            f"  background-color: {badge_color};"
+            f"  color: #ffffff;"
+            f"}}"
+        )
+        self._analysis_badge.show()
 
         # Configure tabs for analysis type
-        self.tabs.setTabVisible(2, not is_crossgroup)  # PCA Sweep
+        self.tabs.setTabVisible(2, is_pca_ols)  # PCA Sweep — only for PCA+OLS
+        self.tabs.setTabVisible(5, not is_crossgroup)  # Document Scores — not for groups
+        self.tabs.setTabVisible(6, not is_crossgroup)  # Extreme Docs — not for groups
+        self.tabs.setTabVisible(7, not is_crossgroup)  # Misdiagnosed — not for groups
         self.tabs.setTabText(3, "Contrast Snippets" if is_crossgroup else "Beta Snippets")
-        self.tabs.setTabText(5, "Contrast Scores" if is_crossgroup else "Document Scores")
 
         # Configure contrast selector
-        if is_crossgroup and results.contrast_results and len(results.contrast_results) > 1:
+        if is_crossgroup and ssd_result.pairwise and len(ssd_result.pairwise) > 1:
+            contrast_labels = [ssd_result._contrast_label(pk) for pk in ssd_result.pairwise]
             self._contrast_combo.blockSignals(True)
             self._contrast_combo.clear()
-            for key in results.contrast_results:
+            for key in contrast_labels:
                 self._contrast_combo.addItem(key)
             self._contrast_combo.blockSignals(False)
             self._contrast_combo.setCurrentIndex(0)
-            self._current_contrast_key = list(results.contrast_results.keys())[0]
+            self._current_contrast_key = contrast_labels[0]
             self._contrast_row.show()
         else:
             self._contrast_row.hide()
-            if is_crossgroup and results.contrast_results:
-                self._current_contrast_key = list(results.contrast_results.keys())[0]
+            if is_crossgroup and ssd_result.pairwise:
+                contrast_labels = [ssd_result._contrast_label(pk) for pk in ssd_result.pairwise]
+                self._current_contrast_key = contrast_labels[0]
 
         # Update stats strip
         if is_crossgroup:
-            self._show_crossgroup_stats(results)
+            self._show_crossgroup_stats(ssd_result)
         else:
-            self._show_continuous_stats(results)
+            self._show_continuous_stats(ssd_result)
 
         # Update group-specific labels
         if is_crossgroup:
@@ -863,19 +1018,27 @@ class Stage3Widget(QWidget):
         # Update scores sort combo for analysis type
         self._update_scores_sort_combo(is_crossgroup)
 
+        # Resolve the display-data object (result itself or active ContrastResult)
+        display = self._get_display_data()
+
         # Populate every tab, pumping events between each so the spinner animates
-        self._load_cluster_overview(results)
+        self._load_cluster_overview(display)
         QApplication.processEvents()
-        self._load_poles_tab(results)
+        self._load_poles_tab(display)
         QApplication.processEvents()
         self._load_snippets_tab()
         QApplication.processEvents()
-        self._load_scores_tab(results)
+        self._load_scores_tab(ssd_result)
         QApplication.processEvents()
-        self._load_config_tab(run)
+        self._load_config_tab(result)
         QApplication.processEvents()
+        if is_pca_ols:
+            self._load_pca_sweep_tab(result)
         if not is_crossgroup:
-            self._load_pca_sweep_tab(run)
+            self._load_extreme_docs_tab(ssd_result)
+            QApplication.processEvents()
+            self._load_misdiagnosed_tab(ssd_result)
+            QApplication.processEvents()
 
         self._overlay_tabs.stop()
 
@@ -884,29 +1047,43 @@ class Stage3Widget(QWidget):
     # ------------------------------------------------------------------ #
 
     def _show_continuous_stats(self, results):
-        """Populate the stats strip for continuous analysis."""
-        self._set_stat_card(0, "R-squared", f"{results.r2:.4f}")
-        self._set_stat_card(1, "Adj. R-squared", f"{results.r2_adj:.4f}")
-        self._set_stat_card(2, "F-statistic", f"{results.f_stat:.2f}")
-        self._set_stat_card(3, "p-value", f"{results.f_pvalue:.2e}")
-        self._set_stat_card(4, "Documents Used", f"{results.n_kept:,}")
+        """Populate the stats strip for continuous analysis (PLS or PCA+OLS)."""
+        p_str = f"{results.pvalue:.2e}" if results.pvalue < 0.001 else f"{results.pvalue:.4f}"
 
-        k_text = str(results.selected_k) if results.selected_k else "\u2014"
-        self._set_stat_card(5, "PCA K", k_text)
-
-        if results.pca_var_explained:
-            var_text = f"{results.pca_var_explained * 100:.1f}%"
+        if results.result_type == "pca_ols":
+            # PCA+OLS: R² | Adj R² | p-value | β‖ | Docs | Selected K | Corr(y,ŷ)
+            self._set_stat_card(0, "R\u00b2", f"{results.r2:.4f}")
+            self._set_stat_card(1, "Adj. R\u00b2", f"{results.r2_adj:.4f}")
+            self._set_stat_card(2, "p-value", p_str)
+            self._set_stat_card(3, "\u2016\u03b2\u2016", f"{results.beta_norm:.4f}")
+            self._set_stat_card(4, "Documents Used", f"{results.n_kept:,}")
+            k_text = str(results.n_components) if results.n_components else "\u2014"
+            self._set_stat_card(5, "Selected K", k_text)
+            self._set_stat_card(6, "Corr(y, \u0177)", f"{results.y_corr_pred:.4f}")
         else:
-            var_text = "\u2014"
-        self._set_stat_card(6, "PCA Variance Explained", var_text)
+            # PLS: R² | p-value | β‖ | Δy | Docs | IQR Effect | Corr(y,ŷ)
+            self._set_stat_card(0, "R\u00b2", f"{results.r2:.4f}")
+            self._set_stat_card(1, "p-value", p_str)
+            self._set_stat_card(2, "\u2016\u03b2\u2016", f"{results.beta_norm:.4f}")
+            self._set_stat_card(3, "\u0394y / +0.10 cos", f"{results.delta:.4f}")
+            self._set_stat_card(4, "Documents Used", f"{results.n_kept:,}")
+            self._set_stat_card(5, "IQR Effect", f"{results.iqr_effect:.4f}")
+            self._set_stat_card(6, "Corr(y, \u0177)", f"{results.y_corr_pred:.4f}")
+
+    def _contrast_key_to_pair(self, result, label: str):
+        """Convert 'A vs B' label to the pairwise dict entry."""
+        if not label or not hasattr(result, 'pairwise') or not result.pairwise:
+            return None
+        for pair_key, data in result.pairwise.items():
+            if result._contrast_label(pair_key) == label:
+                return data
+        return None
 
     def _show_crossgroup_stats(self, results):
-        """Populate the stats strip for crossgroup analysis."""
+        """Populate the stats strip for group comparison analysis."""
         n_groups = len(results.group_labels) if results.group_labels else 0
 
-        cr = None
-        if self._current_contrast_key and results.contrast_results:
-            cr = results.contrast_results.get(self._current_contrast_key, {})
+        cr = self._contrast_key_to_pair(results, self._current_contrast_key)
 
         # Parse group names from current contrast key
         g1_name, g2_name = "Group A", "Group B"
@@ -916,7 +1093,7 @@ class Stage3Widget(QWidget):
                 g1_name, g2_name = parts[0], parts[1]
 
         if n_groups > 2:
-            # 3+ groups: Omnibus p | p (corrected) | Cohen's d | Cos Distance | n docs | n(A) | n(B)
+            # 3+ groups: Omnibus p | p (corrected) | Cohen's d | ‖Contrast‖ | n docs | n(A) | n(B)
             if results.omnibus_p is not None:
                 omnibus_p_str = f"{results.omnibus_p:.2e}" if results.omnibus_p < 0.001 else f"{results.omnibus_p:.4f}"
             else:
@@ -924,37 +1101,35 @@ class Stage3Widget(QWidget):
             self._set_stat_card(0, "Omnibus p", omnibus_p_str)
 
             if cr:
-                p_corr = cr.get("p_corrected", 0)
-                p_str = f"{p_corr:.2e}" if p_corr < 0.001 else f"{p_corr:.4f}"
+                p_str = f"{cr['p_corrected']:.2e}" if cr["p_corrected"] < 0.001 else f"{cr['p_corrected']:.4f}"
                 self._set_stat_card(1, "p (corrected)", p_str)
-                self._set_stat_card(2, "Cohen's d", f"{cr.get('cohens_d', 0):.3f}")
-                self._set_stat_card(3, "Cos Distance", f"{cr.get('cosine_distance', 0):.4f}")
-                self._set_stat_card(5, f"n ({g1_name})", f"{cr.get('n_g1', 0):,}")
-                self._set_stat_card(6, f"n ({g2_name})", f"{cr.get('n_g2', 0):,}")
+                self._set_stat_card(2, "Cohen's d", f"{cr['cohens_d']:.3f}")
+                self._set_stat_card(3, "\u2016Contrast\u2016", f"{cr['contrast_norm']:.4f}")
+                self._set_stat_card(5, f"n ({g1_name})", f"{cr['n_g1']:,}")
+                self._set_stat_card(6, f"n ({g2_name})", f"{cr['n_g2']:,}")
             else:
                 self._set_stat_card(1, "p (corrected)", "\u2014")
                 self._set_stat_card(2, "Cohen's d", "\u2014")
-                self._set_stat_card(3, "Cos Distance", "\u2014")
+                self._set_stat_card(3, "\u2016Contrast\u2016", "\u2014")
                 self._set_stat_card(5, f"n ({g1_name})", "\u2014")
                 self._set_stat_card(6, f"n ({g2_name})", "\u2014")
 
             self._set_stat_card(4, "Documents Used", f"{results.n_kept:,}")
         else:
-            # 2 groups: p-value | Cohen's d | Cos Distance | ||Contrast|| | n docs | n(A) | n(B)
+            # 2 groups: p-value | Cohen's d | ‖Contrast‖ | Δ(cos) | n docs | n(A) | n(B)
             if cr:
-                p_raw = cr.get("p_raw", 0)
-                p_str = f"{p_raw:.2e}" if p_raw < 0.001 else f"{p_raw:.4f}"
+                p_str = f"{cr['p_raw']:.2e}" if cr["p_raw"] < 0.001 else f"{cr['p_raw']:.4f}"
                 self._set_stat_card(0, "p-value", p_str)
-                self._set_stat_card(1, "Cohen's d", f"{cr.get('cohens_d', 0):.3f}")
-                self._set_stat_card(2, "Cos Distance", f"{cr.get('cosine_distance', 0):.4f}")
-                self._set_stat_card(3, "\u2016Contrast\u2016", f"{cr.get('contrast_norm', 0):.4f}")
-                self._set_stat_card(5, f"n ({g1_name})", f"{cr.get('n_g1', 0):,}")
-                self._set_stat_card(6, f"n ({g2_name})", f"{cr.get('n_g2', 0):,}")
+                self._set_stat_card(1, "Cohen's d", f"{cr['cohens_d']:.3f}")
+                self._set_stat_card(2, "\u2016Contrast\u2016", f"{cr['contrast_norm']:.4f}")
+                self._set_stat_card(3, "n Permutations", f"{results.n_perm:,}")
+                self._set_stat_card(5, f"n ({g1_name})", f"{cr['n_g1']:,}")
+                self._set_stat_card(6, f"n ({g2_name})", f"{cr['n_g2']:,}")
             else:
                 self._set_stat_card(0, "p-value", "\u2014")
                 self._set_stat_card(1, "Cohen's d", "\u2014")
-                self._set_stat_card(2, "Cos Distance", "\u2014")
-                self._set_stat_card(3, "\u2016Contrast\u2016", "\u2014")
+                self._set_stat_card(2, "\u2016Contrast\u2016", "\u2014")
+                self._set_stat_card(3, "n Permutations", f"{results.n_perm:,}")
                 self._set_stat_card(5, f"n ({g1_name})", "\u2014")
                 self._set_stat_card(6, f"n ({g2_name})", "\u2014")
 
@@ -1018,54 +1193,113 @@ class Stage3Widget(QWidget):
             "Snippets ranked by alignment with the \u03b2 direction (not clustered)"
         )
 
-    def _apply_contrast_to_results(self, results, key: str):
-        """Copy contrast-specific data to top-level RunResults fields."""
-        cr = results.contrast_results.get(key, {})
-        results.pos_neighbors = cr.get("pos_neighbors", [])
-        results.neg_neighbors = cr.get("neg_neighbors", [])
-        results.clusters_summary = cr.get("clusters_summary", [])
-        results.clusters_members = cr.get("clusters_members", [])
-        results.cluster_snippets_pos = cr.get("cluster_snippets_pos", [])
-        results.cluster_snippets_neg = cr.get("cluster_snippets_neg", [])
-        results.beta_snippets_pos = cr.get("beta_snippets_pos", [])
-        results.beta_snippets_neg = cr.get("beta_snippets_neg", [])
-        results.doc_scores = cr.get("contrast_scores", [])
+    def _get_display_data(self):
+        """Return a namespace whose fields drive the current display.
+
+        For continuous analyses: data comes from the result directly.
+        For groups: data is filtered to the active contrast.
+        """
+        from types import SimpleNamespace
+        result = self.current_result._result if self.current_result else None
+        if result is None:
+            return None
+
+        is_group = result.result_type == "group"
+        contrast = self._current_contrast_key if is_group else None
+
+        # -- top words / poles --
+        all_tw = result.top_words() or []
+        if contrast:
+            all_tw = [w for w in all_tw if w.get("contrast") == contrast]
+        pos_neighbors = [w for w in all_tw if w["side"] == "pos"]
+        neg_neighbors = [w for w in all_tw if w["side"] == "neg"]
+
+        # -- clusters --
+        pos_raw = result.cluster_neighbors("pos") or []
+        neg_raw = result.cluster_neighbors("neg") or []
+        if contrast:
+            pos_raw = [c for c in pos_raw if c.get("contrast") == contrast]
+            neg_raw = [c for c in neg_raw if c.get("contrast") == contrast]
+        clusters_summary = (
+            _clusters_to_summary(pos_raw, "pos")
+            + _clusters_to_summary(neg_raw, "neg")
+        )
+        clusters_members = (
+            _clusters_to_members(pos_raw, "pos")
+            + _clusters_to_members(neg_raw, "neg")
+        )
+
+        # -- snippets --
+        snip = result.snippets() if result._cached_snippets is not None else None
+        if snip and contrast:
+            snippets_pos = [s for s in snip.get("pos", []) if s.get("contrast") == contrast]
+            snippets_neg = [s for s in snip.get("neg", []) if s.get("contrast") == contrast]
+        elif snip:
+            snippets_pos = snip.get("pos", [])
+            snippets_neg = snip.get("neg", [])
+        else:
+            snippets_pos = []
+            snippets_neg = []
+
+        # -- cluster snippets --
+        csnip = result.cluster_snippets() if result._cached_cluster_snippets is not None else None
+        if csnip and contrast:
+            cluster_snippets_pos = [s for s in csnip.get("pos", []) if s.get("contrast") == contrast]
+            cluster_snippets_neg = [s for s in csnip.get("neg", []) if s.get("contrast") == contrast]
+        elif csnip:
+            cluster_snippets_pos = csnip.get("pos", [])
+            cluster_snippets_neg = csnip.get("neg", [])
+        else:
+            cluster_snippets_pos = []
+            cluster_snippets_neg = []
+
+        return SimpleNamespace(
+            pos_neighbors=pos_neighbors,
+            neg_neighbors=neg_neighbors,
+            clusters_summary=clusters_summary,
+            clusters_members=clusters_members,
+            snippets_pos=snippets_pos,
+            snippets_neg=snippets_neg,
+            cluster_snippets_pos=cluster_snippets_pos,
+            cluster_snippets_neg=cluster_snippets_neg,
+        )
 
     def _on_contrast_selected(self, index: int):
         """Handle contrast selection change in crossgroup mode."""
-        if index < 0 or not self.current_run or not self.current_run.results:
+        if index < 0 or not self.current_result or not self.current_result._result:
             return
 
-        results = self.current_run.results
-        if not results.contrast_results:
+        result = self.current_result._result
+        if not hasattr(result, 'pairwise') or not result.pairwise:
             return
 
         key = self._contrast_combo.currentText()
-        if key not in results.contrast_results:
+        # Validate the key matches a known contrast
+        if not any(result._contrast_label(pk) == key for pk in result.pairwise):
             return
 
         self._current_contrast_key = key
 
-        # Copy contrast data to top-level results fields
-        self._apply_contrast_to_results(results, key)
-
         # Update stats strip
-        self._show_crossgroup_stats(results)
+        self._show_crossgroup_stats(result)
 
         # Update group labels in UI
         self._update_crossgroup_labels()
+
+        # Resolve display data from the new contrast
+        display = self._get_display_data()
 
         # Reload data tabs
         self._overlay_tabs.start()
         QApplication.processEvents()
 
-        self._load_cluster_overview(results)
+        self._load_cluster_overview(display)
         QApplication.processEvents()
-        self._load_poles_tab(results)
+        self._load_poles_tab(display)
         QApplication.processEvents()
         self._load_snippets_tab()
         QApplication.processEvents()
-        self._load_scores_tab(results)
+        self._load_scores_tab(result)
 
         self._overlay_tabs.stop()
 
@@ -1073,14 +1307,7 @@ class Stage3Widget(QWidget):
         """Update the scores sort combo for the current analysis type."""
         self.scores_sort_combo.blockSignals(True)
         self.scores_sort_combo.clear()
-        if is_crossgroup:
-            self.scores_sort_combo.addItems([
-                "Document Index",
-                "Cosine (High \u2192 Low)",
-                "Cosine (Low \u2192 High)",
-                "By Group",
-            ])
-        else:
+        if not is_crossgroup:
             self.scores_sort_combo.addItems([
                 "Document Index",
                 "Cosine (High \u2192 Low)",
@@ -1132,9 +1359,11 @@ class Stage3Widget(QWidget):
 
     def _reload_cluster_tables(self):
         """Re-fill cluster tables when topN changes."""
-        if not self.current_run or not self.current_run.results:
+        if not self.current_result or not self.current_result._result:
             return
-        self._load_cluster_overview(self.current_run.results)
+        display = self._get_display_data()
+        if display:
+            self._load_cluster_overview(display)
 
     def _refresh_overview_snippets(self):
         """Re-fill the snippet table when the snippets-per-cluster limit changes."""
@@ -1148,15 +1377,19 @@ class Stage3Widget(QWidget):
         other.clearSelection()
 
         row = table.currentRow()
-        if row < 0 or not self.current_run or not self.current_run.results:
+        if row < 0 or not self.current_result or not self.current_result._result:
             return
 
         self._overlay_right_panel.start()
         QApplication.processEvents()
 
-        results = self.current_run.results
+        display = self._get_display_data()
+        if display is None:
+            self._overlay_right_panel.stop()
+            return
+
         clusters_for_side = [
-            c for c in (results.clusters_summary or []) if c.get("side") == side
+            c for c in (display.clusters_summary or []) if c.get("side") == side
         ]
         if row >= len(clusters_for_side):
             self._overlay_right_panel.stop()
@@ -1168,7 +1401,7 @@ class Stage3Widget(QWidget):
 
         # Build member words string from members data
         members = [
-            m for m in (results.clusters_members or [])
+            m for m in (display.clusters_members or [])
             if m.get("cluster_rank") == cluster_rank and m.get("side") == side
         ]
         member_words = [m.get("word", "") for m in members]
@@ -1183,10 +1416,10 @@ class Stage3Widget(QWidget):
         self._keywords_expanded = False
         self._update_keywords_display()
 
-        # Find matching snippets
+        # Find matching snippets (filter from cluster-based snippets by centroid_label)
         snippets_pool = (
-            results.cluster_snippets_pos if side == "pos"
-            else results.cluster_snippets_neg
+            display.cluster_snippets_pos if side == "pos"
+            else display.cluster_snippets_neg
         ) or []
 
         snippets = [
@@ -1301,20 +1534,20 @@ class Stage3Widget(QWidget):
 
     def _load_snippets_tab(self):
         """Load beta snippets based on current side selection."""
-        if not self.current_run or not self.current_run.results:
+        if not self.current_result or not self.current_result._result:
             self.snippets_table.setRowCount(0)
             return
 
         self._overlay_snippets.start()
         QApplication.processEvents()
 
-        results = self.current_run.results
+        display = self._get_display_data()
         idx = self.snippet_side_combo.currentIndex()
 
         if idx == 0:
-            snippets = results.beta_snippets_pos or []
+            snippets = (display.snippets_pos if display else None) or []
         else:
-            snippets = results.beta_snippets_neg or []
+            snippets = (display.snippets_neg if display else None) or []
 
         self._display_snippets_tab(snippets)
 
@@ -1385,7 +1618,7 @@ class Stage3Widget(QWidget):
 
         html = []
         html.append(
-            f'<table cellspacing="8" style="margin-bottom: 12px;"><tr>'
+            '<table cellspacing="8" style="margin-bottom: 12px;"><tr>'
         )
 
         # Stats cards
@@ -1447,55 +1680,57 @@ class Stage3Widget(QWidget):
         """Load the scores tab data."""
         self.scores_detail.clear()
         self.scores_detail_title.setText("Select a row to view its document text")
-        if not results.doc_scores:
+
+        # Groups have no doc_scores — tab is hidden, but guard anyway
+        if results.result_type == "group":
             self.scores_table.setRowCount(0)
             self.scores_table.setColumnCount(0)
             self._scores_df = None
             return
 
-        df = pd.DataFrame(results.doc_scores)
+        try:
+            scores = results.doc_scores()
+        except Exception:
+            self.scores_table.setRowCount(0)
+            self.scores_table.setColumnCount(0)
+            self._scores_df = None
+            return
+
+        if not scores:
+            self.scores_table.setRowCount(0)
+            self.scores_table.setColumnCount(0)
+            self._scores_df = None
+            return
+
+        df = pd.DataFrame(scores)
         self._scores_df = df
 
-        is_crossgroup = results.analysis_type == "crossgroup"
-
-        if is_crossgroup:
-            col_labels = {
-                "doc_index": "Doc #",
-                "group": "Group",
-                "cos": "Cos to Contrast",
-            }
-        else:
-            # Friendly column names
-            col_labels = {
-                "doc_index": "Doc #",
-                "kept": "Kept",
-                "cos": "Cosine",
-                "yhat_std": "Predicted (std)",
-                "yhat_raw": "Predicted (raw)",
-                "y_true_std": "Actual (std)",
-                "y_true_raw": "Actual (raw)",
-            }
+        # Friendly column names for continuous results
+        # Runner produces: {idx, cos_align, score_std, yhat_raw}
+        col_labels = {
+            "idx": "Doc #",
+            "cos_align": "Cosine",
+            "score_std": "Score (std)",
+            "yhat_raw": "Predicted (raw)",
+        }
 
         display_cols = [col_labels.get(c, c) for c in df.columns]
 
         self.scores_table.setColumnCount(len(df.columns))
         self.scores_table.setHorizontalHeaderLabels(display_cols)
         header = self.scores_table.horizontalHeader()
-        if is_crossgroup:
-            for col_idx, col_name in enumerate(df.columns):
-                if col_name == "cos":
-                    header.resizeSection(col_idx, 150)
-        else:
-            for col_idx, col_name in enumerate(df.columns):
-                if col_name in ("yhat_std", "yhat_raw", "y_true_std", "y_true_raw"):
-                    header.resizeSection(col_idx, 110)
+        for col_idx, col_name in enumerate(df.columns):
+            if col_name in ("score_std", "yhat_raw"):
+                header.resizeSection(col_idx, 120)
         self._render_scores_df(df)
 
     def _render_scores_df(self, df: pd.DataFrame):
         """Render a DataFrame into the scores table."""
         self._scores_rendered_df = df.reset_index(drop=True)
-        self.scores_table.setUpdatesEnabled(False)
-        self.scores_table.setRowCount(len(df))
+        table = self.scores_table
+        table.setSortingEnabled(False)
+        table.setUpdatesEnabled(False)
+        table.setRowCount(len(df))
         for i, (_, row) in enumerate(df.iterrows()):
             for j, (col, value) in enumerate(row.items()):
                 if pd.isna(value):
@@ -1506,9 +1741,10 @@ class Stage3Widget(QWidget):
                     text = f"{value:.4f}"
                 else:
                     text = str(value)
-                self.scores_table.setItem(i, j, QTableWidgetItem(text))
-            QApplication.processEvents()
-        self.scores_table.setUpdatesEnabled(True)
+                table.setItem(i, j, QTableWidgetItem(text))
+        table.setUpdatesEnabled(True)
+        table.setSortingEnabled(True)
+        QApplication.processEvents()
 
     def _sort_scores(self):
         """Sort the scores table."""
@@ -1521,32 +1757,17 @@ class Stage3Widget(QWidget):
         idx = self.scores_sort_combo.currentIndex()
         df = self._scores_df.copy()
 
-        is_crossgroup = (
-            self.current_run and self.current_run.results
-            and self.current_run.results.analysis_type == "crossgroup"
-        )
-
         try:
-            if is_crossgroup:
-                if idx == 0:
-                    df = df.sort_values("doc_index")
-                elif idx == 1:
-                    df = df.sort_values("cos", ascending=False)
-                elif idx == 2:
-                    df = df.sort_values("cos", ascending=True)
-                elif idx == 3 and "group" in df.columns:
-                    df = df.sort_values("group")
-            else:
-                if idx == 0:
-                    df = df.sort_values("doc_index")
-                elif idx == 1:
-                    df = df.sort_values("cos", ascending=False)
-                elif idx == 2:
-                    df = df.sort_values("cos", ascending=True)
-                elif idx == 3:
-                    df = df.sort_values("yhat_raw", ascending=False)
-                elif idx == 4:
-                    df = df.sort_values("yhat_raw", ascending=True)
+            if idx == 0:
+                df = df.sort_values("idx")
+            elif idx == 1:
+                df = df.sort_values("cos_align", ascending=False)
+            elif idx == 2:
+                df = df.sort_values("cos_align", ascending=True)
+            elif idx == 3:
+                df = df.sort_values("yhat_raw", ascending=False)
+            elif idx == 4:
+                df = df.sort_values("yhat_raw", ascending=True)
         except KeyError:
             pass
 
@@ -1563,7 +1784,7 @@ class Stage3Widget(QWidget):
         if row >= len(df):
             return
 
-        doc_index = int(df.iloc[row].get("doc_index", -1))
+        doc_index = int(df.iloc[row].get("idx", -1))
         if doc_index < 0:
             return
 
@@ -1575,65 +1796,39 @@ class Stage3Widget(QWidget):
         rec = df.iloc[row]
         doc_text = self._get_document_text(doc_index)
 
-        is_crossgroup = (
-            self.current_run and self.current_run.results
-            and self.current_run.results.analysis_type == "crossgroup"
-        )
-
         html_parts = []
         html_parts.append(
             '<table cellspacing="8" style="margin-bottom: 12px;">'
             "<tr>"
         )
 
-        # Stats row
-        cos_val = rec.get("cos")
+        # Stats row — continuous results: cosine, predicted, score
+        cos_val = rec.get("cos_align")
         if pd.notna(cos_val):
-            cos_label = "COS TO CONTRAST" if is_crossgroup else "COSINE"
             html_parts.append(
                 f'<td style="padding-right: 20px;">'
-                f'<span style="color: {p.text_secondary}; font-size: {p.font_size_sm};">{cos_label}</span><br/>'
+                f'<span style="color: {p.text_secondary}; font-size: {p.font_size_sm};">COSINE</span><br/>'
                 f'<span style="font-size: {p.font_size_lg}; font-weight: 600;">{float(cos_val):.4f}</span>'
                 f"</td>"
             )
 
-        if is_crossgroup:
-            group_val = rec.get("group")
-            if pd.notna(group_val):
-                html_parts.append(
-                    f'<td style="padding-right: 20px;">'
-                    f'<span style="color: {p.text_secondary}; font-size: {p.font_size_sm};">GROUP</span><br/>'
-                    f'<span style="font-size: {p.font_size_lg}; font-weight: 600;">{group_val}</span>'
-                    f"</td>"
-                )
-        else:
-            yhat = rec.get("yhat_raw")
-            if pd.notna(yhat):
-                html_parts.append(
-                    f'<td style="padding-right: 20px;">'
-                    f'<span style="color: {p.text_secondary}; font-size: {p.font_size_sm};">PREDICTED</span><br/>'
-                    f'<span style="font-size: {p.font_size_lg}; font-weight: 600;">{float(yhat):.4f}</span>'
-                    f"</td>"
-                )
+        yhat = rec.get("yhat_raw")
+        if pd.notna(yhat):
+            html_parts.append(
+                f'<td style="padding-right: 20px;">'
+                f'<span style="color: {p.text_secondary}; font-size: {p.font_size_sm};">PREDICTED</span><br/>'
+                f'<span style="font-size: {p.font_size_lg}; font-weight: 600;">{float(yhat):.4f}</span>'
+                f"</td>"
+            )
 
-            y_true = rec.get("y_true_raw")
-            if pd.notna(y_true):
-                html_parts.append(
-                    f'<td style="padding-right: 20px;">'
-                    f'<span style="color: {p.text_secondary}; font-size: {p.font_size_sm};">ACTUAL</span><br/>'
-                    f'<span style="font-size: {p.font_size_lg}; font-weight: 600;">{float(y_true):.4f}</span>'
-                    f"</td>"
-                )
-
-            kept = rec.get("kept")
-            if pd.notna(kept):
-                kept_str = "Yes" if kept else "No"
-                html_parts.append(
-                    f'<td style="padding-right: 20px;">'
-                    f'<span style="color: {p.text_secondary}; font-size: {p.font_size_sm};">KEPT</span><br/>'
-                    f'<span style="font-size: {p.font_size_lg}; font-weight: 600;">{kept_str}</span>'
-                    f"</td>"
-                )
+        score_std = rec.get("score_std")
+        if pd.notna(score_std):
+            html_parts.append(
+                f'<td style="padding-right: 20px;">'
+                f'<span style="color: {p.text_secondary}; font-size: {p.font_size_sm};">SCORE (STD)</span><br/>'
+                f'<span style="font-size: {p.font_size_lg}; font-weight: 600;">{float(score_std):.4f}</span>'
+                f"</td>"
+            )
 
         html_parts.append("</tr></table>")
 
@@ -1657,34 +1852,110 @@ class Stage3Widget(QWidget):
 
         self.scores_detail.setHtml("".join(html_parts))
 
+    def _load_extreme_docs_tab(self, ssd_result):
+        """Populate the extreme documents tab."""
+        from ..utils.report_settings import get_report_setting, KEY_EXTREME_DOCS
+        k = get_report_setting(KEY_EXTREME_DOCS)
+        if k == 0:
+            self._extreme_high_table.setRowCount(0)
+            self._extreme_low_table.setRowCount(0)
+            return
+
+        try:
+            docs = ssd_result.extreme_docs(k=k, by="predicted")
+        except Exception:
+            return
+
+
+        for table, side in [(self._extreme_high_table, "top"),
+                            (self._extreme_low_table, "bottom")]:
+            side_docs = [d for d in docs if d["side"] == side]
+            headers = ["Rank", "Document Text", "Score", "Actual Y"]
+            table.setColumnCount(len(headers))
+            table.setHorizontalHeaderLabels(headers)
+            table.setRowCount(len(side_docs))
+
+            for row_i, doc in enumerate(side_docs):
+                idx = doc["idx"]
+                text = self._get_document_text(idx) or ""
+                if len(text) > 200:
+                    text = text[:200] + "..."
+
+                table.setItem(row_i, 0, QTableWidgetItem(str(row_i + 1)))
+                table.setItem(row_i, 1, QTableWidgetItem(text))
+                table.setItem(row_i, 2, QTableWidgetItem(f"{doc['cos']:.4f}"))
+                table.setItem(row_i, 3, QTableWidgetItem(f"{doc['y_true']:.4f}"))
+
+            table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+            table.resizeColumnsToContents()
+            table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+
+    def _load_misdiagnosed_tab(self, ssd_result):
+        """Populate the misdiagnosed documents tab."""
+        from ..utils.report_settings import get_report_setting, KEY_MISDIAGNOSED
+        k = get_report_setting(KEY_MISDIAGNOSED)
+        if k == 0:
+            self._misdiag_over_table.setRowCount(0)
+            self._misdiag_under_table.setRowCount(0)
+            return
+
+        try:
+            docs = ssd_result.misdiagnosed(k=k, side="both")
+        except Exception:
+            return
+
+        for table, side in [(self._misdiag_over_table, "over"),
+                            (self._misdiag_under_table, "under")]:
+            side_docs = [d for d in docs if d["side"] == side]
+            headers = ["Rank", "Document Text", "Actual Y", "Predicted Y", "Residual"]
+            table.setColumnCount(len(headers))
+            table.setHorizontalHeaderLabels(headers)
+            table.setRowCount(len(side_docs))
+
+            for row_i, doc in enumerate(side_docs):
+                idx = doc["idx"]
+                text = self._get_document_text(idx) or ""
+                if len(text) > 200:
+                    text = text[:200] + "..."
+
+                table.setItem(row_i, 0, QTableWidgetItem(str(row_i + 1)))
+                table.setItem(row_i, 1, QTableWidgetItem(text))
+                table.setItem(row_i, 2, QTableWidgetItem(f"{doc['y_true']:.4f}"))
+                table.setItem(row_i, 3, QTableWidgetItem(f"{doc['yhat']:.4f}"))
+                table.setItem(row_i, 4, QTableWidgetItem(f"{doc['residual']:.4f}"))
+
+            table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+            table.resizeColumnsToContents()
+            table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+
     def _get_document_text(self, doc_index: int) -> Optional[str]:
         """Retrieve the original text for a document by its index."""
         if self.project is None:
             return None
 
-        cfg = self.project.dataset_config
-        if not cfg.csv_path or not cfg.text_column:
+        p = self.project
+        if not p.csv_path or not p.text_column:
             return None
 
         # Use the cached DataFrame if available
-        df = self.project._cached_df
+        df = p._df
         if df is None:
             # Lazily load the CSV
-            csv_path = cfg.csv_path
+            csv_path = Path(str(p.csv_path))
             if not csv_path.exists():
                 return None
             try:
                 df = pd.read_csv(csv_path)
-                self.project._cached_df = df
+                p._df = df
             except Exception:
                 return None
 
-        if cfg.text_column not in df.columns:
+        if p.text_column not in df.columns:
             return None
         if doc_index < 0 or doc_index >= len(df):
             return None
 
-        value = df.iloc[doc_index][cfg.text_column]
+        value = df.iloc[doc_index][p.text_column]
         if pd.isna(value):
             return None
         return str(value)
@@ -1724,7 +1995,7 @@ class Stage3Widget(QWidget):
         html.append("</table>")
         return html
 
-    def _load_config_tab(self, run: Run):
+    def _load_config_tab(self, result: Result):
         """Load the configuration tab data."""
         p = self._html_palette()
         # Common styles
@@ -1735,94 +2006,96 @@ class Stage3Widget(QWidget):
             f"border-bottom: 1px solid {p.border}; padding-bottom: 4px; margin: 12px 0 8px 0;"
         )
 
-        is_crossgroup = run.results and run.results.analysis_type == "crossgroup"
-        is_fulldoc = run.concept_config.mode == "fulldoc"
+        is_crossgroup = result._result and result._result.result_type == "group"
+        is_fulldoc = result.config_snapshot.get("concept_mode", "lexicon") == "fulldoc"
 
-        # --- Run Information ---
+        # --- Result Information ---
         run_html = []
         run_html.append('<table cellspacing="6" style="width: 100%;">')
 
         run_html.append(
-            f'<tr><td style="{label_style}">Run ID</td>'
-            f'<td style="{value_style}">{run.run_id}</td></tr>'
+            f'<tr><td style="{label_style}">Result ID</td>'
+            f'<td style="{value_style}">{result.result_id}</td></tr>'
         )
         run_html.append(
             f'<tr><td style="{label_style}">Timestamp</td>'
-            f'<td style="{value_style}">{run.timestamp.strftime("%Y-%m-%d %H:%M:%S")}</td></tr>'
+            f'<td style="{value_style}">{result.timestamp.strftime("%Y-%m-%d %H:%M:%S")}</td></tr>'
         )
         run_html.append(
             f'<tr><td style="{label_style}">Status</td>'
-            f'<td style="{value_style}">{run.status}</td></tr>'
+            f'<td style="{value_style}">{result.status}</td></tr>'
         )
+        atype_display = {"pls": "PLS", "pca_ols": "PCA+OLS", "group": "Group Comparison"}
         run_html.append(
             f'<tr><td style="{label_style}">Analysis Type</td>'
-            f'<td style="{value_style}">{"Group Comparison" if is_crossgroup else "Continuous Outcome"}</td></tr>'
+            f'<td style="{value_style}">{atype_display.get(result._result.result_type, result._result.result_type)}</td></tr>'
         )
         run_html.append(
             f'<tr><td style="{label_style}">Mode</td>'
             f'<td style="{value_style}">{"Full Document" if is_fulldoc else "Lexicon"}</td></tr>'
         )
-        if is_crossgroup and run.concept_config.group_column:
+        s = result.config_snapshot
+        if is_crossgroup and s.get("group_column", ""):
             run_html.append(
                 f'<tr><td style="{label_style}">Group Column</td>'
-                f'<td style="{value_style}">{run.concept_config.group_column}</td></tr>'
+                f'<td style="{value_style}">{s.get("group_column", "")}</td></tr>'
             )
-        elif not is_crossgroup and run.concept_config.outcome_column:
+        elif not is_crossgroup and s.get("outcome_column", ""):
             run_html.append(
                 f'<tr><td style="{label_style}">Outcome Column</td>'
-                f'<td style="{value_style}">{run.concept_config.outcome_column}</td></tr>'
+                f'<td style="{value_style}">{s.get("outcome_column", "")}</td></tr>'
             )
 
         run_html.append("</table>")
 
         # Dataset statistics sub-section
-        spacy_snap = run.frozen_spacy_config
-        ds_snap = run.frozen_dataset_config
+        spacy_snap = result.config_snapshot
+        ds_snap = result.config_snapshot
         run_html.append(f'<div style="{section_style}">Dataset</div>')
         run_html.append('<table cellspacing="6" style="width: 100%;">')
-        if ds_snap.csv_path:
+        if ds_snap.get("csv_path", ""):
             run_html.append(
                 f'<tr><td colspan="2" style="{label_style}">File</td></tr>'
-                f'<tr><td colspan="2" style="{value_style}; word-break: break-all;">{ds_snap.csv_path}</td></tr>'
+                f'<tr><td colspan="2" style="{value_style}; word-break: break-all;">{ds_snap.get("csv_path", "")}</td></tr>'
             )
-        if ds_snap.text_column:
+        if ds_snap.get("text_column", ""):
             run_html.append(
                 f'<tr><td style="{label_style}">Text Column</td>'
-                f'<td style="{value_style}">{ds_snap.text_column}</td></tr>'
+                f'<td style="{value_style}">{ds_snap.get("text_column", "")}</td></tr>'
             )
-        if ds_snap.id_column:
+        if ds_snap.get("id_column"):
             run_html.append(
                 f'<tr><td style="{label_style}">ID Column</td>'
-                f'<td style="{value_style}">{ds_snap.id_column}</td></tr>'
+                f'<td style="{value_style}">{ds_snap.get("id_column")}</td></tr>'
             )
         run_html.append(
             f'<tr><td style="{label_style}">Documents</td>'
-            f'<td style="{value_style}">{spacy_snap.n_docs_processed:,}</td></tr>'
+            f'<td style="{value_style}">{spacy_snap.get("n_docs_processed", 0):,}</td></tr>'
         )
         run_html.append(
             f'<tr><td style="{label_style}">Valid Samples</td>'
-            f'<td style="{value_style}">{ds_snap.n_valid:,}</td></tr>'
+            f'<td style="{value_style}">{ds_snap.get("n_valid", 0):,}</td></tr>'
         )
-        if ds_snap.id_column:
+        if ds_snap.get("id_column"):
             run_html.append(
                 f'<tr><td style="{label_style}">Personal Concept Vectors</td>'
-                f'<td style="{value_style}">{spacy_snap.n_docs_processed:,}</td></tr>'
+                f'<td style="{value_style}">{spacy_snap.get("n_docs_processed", 0):,}</td></tr>'
             )
-        if spacy_snap.mean_words_before_stopwords > 0:
+        if spacy_snap.get("mean_words_before_stopwords", 0) > 0:
             run_html.append(
                 f'<tr><td style="{label_style}">Mean Words / Doc (pre-stopword)</td>'
-                f'<td style="{value_style}">{spacy_snap.mean_words_before_stopwords:.1f}</td></tr>'
+                f'<td style="{value_style}">{spacy_snap.get("mean_words_before_stopwords", 0):.1f}</td></tr>'
             )
-        if spacy_snap.n_docs_processed:
-            avg_tokens_post = spacy_snap.total_tokens / spacy_snap.n_docs_processed
+        if spacy_snap.get("n_docs_processed", 0):
+            avg_tokens_post = spacy_snap.get("total_tokens", 0) / spacy_snap.get("n_docs_processed", 1)
             run_html.append(
                 f'<tr><td style="{label_style}">Mean Tokens / Doc (post-stopword)</td>'
                 f'<td style="{value_style}">{avg_tokens_post:.1f}</td></tr>'
             )
         run_html.append("</table>")
 
-        if run.results:
-            res = run.results
+        if result._result:
+            res = result._result
 
             if is_crossgroup:
                 # Crossgroup: Permutation Test section
@@ -1858,10 +2131,12 @@ class Stage3Widget(QWidget):
                 run_html.append("</table>")
 
                 # Group counts
-                if res.group_counts:
+                if hasattr(res, 'groups_kept') and res.groups_kept is not None:
+                    unique, counts = np.unique(res.groups_kept, return_counts=True)
+                    group_counts = dict(zip(unique, counts))
                     run_html.append(f'<div style="{section_style}">Group Sizes</div>')
                     run_html.append('<table cellspacing="6" style="width: 100%;">')
-                    for g, cnt in sorted(res.group_counts.items()):
+                    for g, cnt in sorted(group_counts.items()):
                         run_html.append(
                             f'<tr><td style="{label_style}">{g}</td>'
                             f'<td style="{value_style}">{cnt:,}</td></tr>'
@@ -1895,18 +2170,15 @@ class Stage3Widget(QWidget):
                     f'<tr><td style="{label_style}">R\u00b2</td>'
                     f'<td style="{value_style}">{res.r2:.4f}</td></tr>'
                 )
+                if res.result_type == "pca_ols":
+                    run_html.append(
+                        f'<tr><td style="{label_style}">Adjusted R\u00b2</td>'
+                        f'<td style="{value_style}">{res.r2_adj:.4f}</td></tr>'
+                    )
+                pval_str = f"{res.pvalue:.2e}" if res.pvalue < 0.001 else f"{res.pvalue:.4f}"
                 run_html.append(
-                    f'<tr><td style="{label_style}">Adjusted R\u00b2</td>'
-                    f'<td style="{value_style}">{res.r2_adj:.4f}</td></tr>'
-                )
-                run_html.append(
-                    f'<tr><td style="{label_style}">F-statistic</td>'
-                    f'<td style="{value_style}">{res.f_stat:.2f}</td></tr>'
-                )
-                f_pval_str = f"{res.f_pvalue:.2e}" if res.f_pvalue < 0.001 else f"{res.f_pvalue:.4f}"
-                run_html.append(
-                    f'<tr><td style="{label_style}">F p-value</td>'
-                    f'<td style="{value_style}">{f_pval_str}</td></tr>'
+                    f'<tr><td style="{label_style}">p-value</td>'
+                    f'<td style="{value_style}">{pval_str}</td></tr>'
                 )
                 run_html.append(
                     f'<tr><td style="{label_style}">Corr(y, \u0177)</td>'
@@ -1919,15 +2191,15 @@ class Stage3Widget(QWidget):
                 run_html.append('<table cellspacing="6" style="width: 100%;">')
                 run_html.append(
                     f'<tr><td style="{label_style}">\u2016\u03b2\u2016 (SD(y) / cosine)</td>'
-                    f'<td style="{value_style}">{res.beta_norm_stdCN:.4f}</td></tr>'
+                    f'<td style="{value_style}">{res.beta_norm:.4f}</td></tr>'
                 )
                 run_html.append(
                     f'<tr><td style="{label_style}">\u0394y per +0.10 cosine</td>'
-                    f'<td style="{value_style}">{res.delta_per_0p10_raw:.4f}</td></tr>'
+                    f'<td style="{value_style}">{res.delta:.4f}</td></tr>'
                 )
                 run_html.append(
                     f'<tr><td style="{label_style}">IQR(cos) effect</td>'
-                    f'<td style="{value_style}">{res.iqr_effect_raw:.4f}</td></tr>'
+                    f'<td style="{value_style}">{res.iqr_effect:.4f}</td></tr>'
                 )
                 run_html.append("</table>")
 
@@ -1950,31 +2222,39 @@ class Stage3Widget(QWidget):
                     )
                 run_html.append("</table>")
 
-                # PCA Diagnostics
-                run_html.append(f'<div style="{section_style}">PCA</div>')
-                run_html.append('<table cellspacing="6" style="width: 100%;">')
-                if res.selected_k:
+                # PCA+OLS specific: components
+                if res.result_type == "pca_ols":
+                    run_html.append(f'<div style="{section_style}">PCA</div>')
+                    run_html.append('<table cellspacing="6" style="width: 100%;">')
                     run_html.append(
                         f'<tr><td style="{label_style}">Components (K)</td>'
-                        f'<td style="{value_style}">{res.selected_k}</td></tr>'
+                        f'<td style="{value_style}">{res.n_components}</td></tr>'
                     )
-                if res.pca_var_explained:
+                    run_html.append("</table>")
+                elif res.result_type == "pls":
+                    run_html.append(f'<div style="{section_style}">PLS</div>')
+                    run_html.append('<table cellspacing="6" style="width: 100%;">')
                     run_html.append(
-                        f'<tr><td style="{label_style}">Variance Explained</td>'
-                        f'<td style="{value_style}">{res.pca_var_explained * 100:.1f}%</td></tr>'
+                        f'<tr><td style="{label_style}">Components</td>'
+                        f'<td style="{value_style}">{res.n_components}</td></tr>'
                     )
-                run_html.append("</table>")
+                    if res.p_method:
+                        run_html.append(
+                            f'<tr><td style="{label_style}">p-value Method</td>'
+                            f'<td style="{value_style}">{res.p_method}</td></tr>'
+                        )
+                    run_html.append("</table>")
 
-        # Pairwise results — shown in Run Information for fulldoc,
+        # Pairwise results — shown in Result Information for fulldoc,
         # in Concept Configuration for lexicon mode
-        if is_crossgroup and run.results and run.results.pairwise_table:
+        if is_crossgroup and result._result and hasattr(result._result, 'results_table'):
             pairwise_html = self._build_pairwise_html(
-                run.results.pairwise_table, section_style, label_style, p
+                result._result.results_table(), section_style, label_style, p
             )
             if is_fulldoc:
                 run_html.extend(pairwise_html)
 
-        self.run_info_text.setHtml("".join(run_html))
+        self.result_info_text.setHtml("".join(run_html))
 
         # --- Concept Configuration (lexicon mode only) ---
         if is_fulldoc:
@@ -1985,22 +2265,22 @@ class Stage3Widget(QWidget):
             concept_html.append('<table cellspacing="6" style="width: 100%;">')
             concept_html.append(
                 f'<tr><td style="{label_style}">Mode</td>'
-                f'<td style="{value_style}">{run.concept_config.mode}</td></tr>'
+                f'<td style="{value_style}">{s.get("concept_mode", "lexicon")}</td></tr>'
             )
-            if is_crossgroup and run.concept_config.group_column:
+            if is_crossgroup and s.get("group_column", ""):
                 concept_html.append(
                     f'<tr><td style="{label_style}">Group Column</td>'
-                    f'<td style="{value_style}">{run.concept_config.group_column}</td></tr>'
+                    f'<td style="{value_style}">{s.get("group_column", "")}</td></tr>'
                 )
-            elif not is_crossgroup and run.concept_config.outcome_column:
+            elif not is_crossgroup and s.get("outcome_column", ""):
                 concept_html.append(
                     f'<tr><td style="{label_style}">Outcome Column</td>'
-                    f'<td style="{value_style}">{run.concept_config.outcome_column}</td></tr>'
+                    f'<td style="{value_style}">{s.get("outcome_column", "")}</td></tr>'
                 )
             concept_html.append("</table>")
 
-            if run.concept_config.lexicon_tokens:
-                tokens = sorted(run.concept_config.lexicon_tokens)
+            if s.get("lexicon_tokens", []):
+                tokens = sorted(s.get("lexicon_tokens", []))
                 concept_html.append(f'<div style="{section_style}">Lexicon ({len(tokens)} tokens)</div>')
                 token_display = ", ".join(tokens[:50])
                 if len(tokens) > 50:
@@ -2010,8 +2290,8 @@ class Stage3Widget(QWidget):
                 )
 
             # Lexicon coverage summary
-            if run.results and run.results.lexicon_coverage_summary:
-                s = run.results.lexicon_coverage_summary
+            if result.config_snapshot.get("lexicon_coverage_summary"):
+                s = result.config_snapshot["lexicon_coverage_summary"]
                 concept_html.append(f'<div style="{section_style}">Lexicon Coverage</div>')
                 concept_html.append('<table cellspacing="6" style="width: 100%;">')
                 concept_html.append(
@@ -2053,7 +2333,7 @@ class Stage3Widget(QWidget):
                 concept_html.append("</table>")
 
             # Per-token coverage breakdown
-            if run.results and run.results.lexicon_coverage_per_token:
+            if result.config_snapshot.get("lexicon_coverage_per_token"):
                 concept_html.append(f'<div style="{section_style}">Per-Token Breakdown</div>')
                 concept_html.append(
                     '<table cellspacing="4" style="width: 100%; font-size: 12px;">'
@@ -2064,7 +2344,7 @@ class Stage3Widget(QWidget):
                 else:
                     concept_html.append("<td>Word</td><td>Docs</td><td>Coverage</td><td>Correlation</td></tr>")
 
-                for t in run.results.lexicon_coverage_per_token:
+                for t in result.config_snapshot["lexicon_coverage_per_token"]:
                     corr = t.get("corr", t.get("cramers_v", 0))
                     corr_color = p.success if corr > 0 else p.error if corr < 0 else p.text_secondary
                     concept_html.append(
@@ -2076,15 +2356,15 @@ class Stage3Widget(QWidget):
                 concept_html.append("</table>")
 
             # Pairwise results table (crossgroup + lexicon mode)
-            if is_crossgroup and run.results and run.results.pairwise_table:
+            if is_crossgroup and result._result and hasattr(result._result, 'results_table'):
                 concept_html.extend(pairwise_html)
 
             self.concept_config_text.setHtml("".join(concept_html))
 
         # --- Model Configuration ---
-        hp = run.frozen_hyperparameters
-        emb = run.frozen_embedding_config
-        spacy = run.frozen_spacy_config
+        hp = result.config_snapshot
+        emb = result.config_snapshot
+        spacy = result.config_snapshot
 
         model_html = []
 
@@ -2092,29 +2372,30 @@ class Stage3Widget(QWidget):
         model_html.append(f'<div style="{section_style}">Embeddings</div>')
         model_html.append('<table cellspacing="6" style="width: 100%;">')
         model_html.append(
-            f'<tr><td style="{label_style}">Path</td>'
-            f'<td style="{value_style}; word-break: break-all;">{emb.model_path}</td></tr>'
+            f'<tr><td style="{label_style}">File</td>'
+            f'<td style="{value_style}; word-break: break-all;">{emb.get("selected_embedding", "") or "N/A"}</td></tr>'
         )
         model_html.append(
             f'<tr><td style="{label_style}">Vocabulary</td>'
-            f'<td style="{value_style}">{emb.vocab_size:,} words</td></tr>'
+            f'<td style="{value_style}">{emb.get("vocab_size", 0):,} words</td></tr>'
         )
         model_html.append(
             f'<tr><td style="{label_style}">Dimensions</td>'
-            f'<td style="{value_style}">{emb.embedding_dim}</td></tr>'
+            f'<td style="{value_style}">{emb.get("embedding_dim", 0)}</td></tr>'
         )
         model_html.append(
             f'<tr><td style="{label_style}">L2 Normalize</td>'
-            f'<td style="{value_style}">{"Yes" if emb.l2_normalize else "No"}</td></tr>'
+            f'<td style="{value_style}">{"Yes" if emb.get("l2_normalized", False) else "No"}</td></tr>'
         )
+        _abtt_m = emb.get("abtt_m", 0)
         model_html.append(
             f'<tr><td style="{label_style}">ABTT</td>'
-            f'<td style="{value_style}">{"Yes" if emb.abtt_enabled else "No"} (m={emb.abtt_m})</td></tr>'
+            f'<td style="{value_style}">{"Yes" if _abtt_m > 0 else "No"} (m={_abtt_m})</td></tr>'
         )
-        if emb.coverage_pct > 0:
-            cov_str = f"{emb.coverage_pct:.1f}%"
-            if emb.n_oov > 0:
-                cov_str += f" ({emb.n_oov:,} OOV)"
+        if emb.get("coverage_pct", 0) > 0:
+            cov_str = f"{emb.get('coverage_pct', 0):.1f}%"
+            if emb.get("n_oov", 0) > 0:
+                cov_str += f" ({emb.get('n_oov', 0):,} OOV)"
             model_html.append(
                 f'<tr><td style="{label_style}">Coverage</td>'
                 f'<td style="{value_style}">{cov_str}</td></tr>'
@@ -2124,84 +2405,128 @@ class Stage3Widget(QWidget):
         # spaCy section
         model_html.append(f'<div style="{section_style}">spaCy</div>')
         model_html.append('<table cellspacing="6" style="width: 100%;">')
+        _input_mode = spacy.get("input_mode", "language")
+        _spacy_model = spacy.get("spacy_model", "")
+        _language = spacy.get("language", "en")
+        if _input_mode == "custom" and _spacy_model:
+            display_model = _spacy_model
+        else:
+            try:
+                from ssdiff.lang_config import lang_to_model
+                display_model = lang_to_model(_language)
+            except (ImportError, KeyError):
+                display_model = f"{_language}_core_news_lg"
         model_html.append(
             f'<tr><td style="{label_style}">Model</td>'
-            f'<td style="{value_style}">{spacy.model}</td></tr>'
+            f'<td style="{value_style}">{display_model}</td></tr>'
         )
         model_html.append(
             f'<tr><td style="{label_style}">Language</td>'
-            f'<td style="{value_style}">{spacy.language}</td></tr>'
+            f'<td style="{value_style}">{_language}</td></tr>'
         )
         model_html.append(
             f'<tr><td style="{label_style}">Documents</td>'
-            f'<td style="{value_style}">{spacy.n_docs_processed:,}</td></tr>'
+            f'<td style="{value_style}">{spacy.get("n_docs_processed", 0):,}</td></tr>'
         )
         model_html.append(
-            f'<tr><td style="{label_style}">Lemmatize</td>'
-            f'<td style="{value_style}">{"Yes" if spacy.lemmatize else "No"}</td></tr>'
+            f'<tr><td style="{label_style}">Input Mode</td>'
+            f'<td style="{value_style}">{_input_mode}</td></tr>'
         )
+        stopword_labels = {"default": "Default", "none": "Disabled", "custom": "Custom file"}
+        _stopword_mode = spacy.get("stopword_mode", "default")
         model_html.append(
-            f'<tr><td style="{label_style}">Remove Stopwords</td>'
-            f'<td style="{value_style}">{"Yes" if spacy.remove_stopwords else "No"}</td></tr>'
+            f'<tr><td style="{label_style}">Stopwords</td>'
+            f'<td style="{value_style}">{stopword_labels.get(_stopword_mode, _stopword_mode)}</td></tr>'
         )
         model_html.append("</table>")
 
-        # Hyperparameters section
+        # Hyperparameters section — analysis-type-specific
+        atype = s.get("analysis_type", "pls")
         model_html.append(f'<div style="{section_style}">Hyperparameters</div>')
         model_html.append('<table cellspacing="6" style="width: 100%;">')
-        if not is_crossgroup:
-            model_html.append(
-                f'<tr><td style="{label_style}">PCA Mode</td>'
-                f'<td style="{value_style}">{hp.n_pca_mode}</td></tr>'
-            )
-            if hp.n_pca_mode == "auto":
-                step = getattr(hp, 'sweep_k_step', 2)
-                model_html.append(
-                    f'<tr><td style="{label_style}">PCA K Range</td>'
-                    f'<td style="{value_style}">{hp.sweep_k_min} - {hp.sweep_k_max} (step {step})</td></tr>'
-                )
-                model_html.append(
-                    f'<tr><td style="{label_style}">AUCK Radius</td>'
-                    f'<td style="{value_style}">{hp.auck_radius}</td></tr>'
-                )
-                model_html.append(
-                    f'<tr><td style="{label_style}">Beta Smoothing</td>'
-                    f'<td style="{value_style}">{hp.beta_smooth_kind}, '
-                    f'window={hp.beta_smooth_win}</td></tr>'
-                )
-                model_html.append(
-                    f'<tr><td style="{label_style}">Weight by Size</td>'
-                    f'<td style="{value_style}">{"Yes" if hp.weight_by_size else "No"}</td></tr>'
-                )
-            else:
-                model_html.append(
-                    f'<tr><td style="{label_style}">PCA K</td>'
-                    f'<td style="{value_style}">{hp.n_pca_manual}</td></tr>'
-                )
-        else:
-            if run.concept_config.n_perm:
-                model_html.append(
-                    f'<tr><td style="{label_style}">Permutations</td>'
-                    f'<td style="{value_style}">{run.concept_config.n_perm:,}</td></tr>'
-                )
+
+        # Common params
         if not is_fulldoc:
             model_html.append(
                 f'<tr><td style="{label_style}">Context Window</td>'
-                f'<td style="{value_style}">\u00b1{hp.context_window_size}</td></tr>'
+                f'<td style="{value_style}">\u00b1{hp.get("context_window_size", 5)}</td></tr>'
             )
         model_html.append(
             f'<tr><td style="{label_style}">SIF Parameter</td>'
-            f'<td style="{value_style}">{hp.sif_a}</td></tr>'
+            f'<td style="{value_style}">{hp.get("sif_a", 1e-3)}</td></tr>'
         )
-        if not is_crossgroup:
+
+        # PLS-specific
+        if atype == "pls":
+            _pls_n_comp = hp.get("pls_n_components", 0)
+            n_comp_display = "auto" if _pls_n_comp == 0 else _pls_n_comp
             model_html.append(
-                f'<tr><td style="{label_style}">Unit Beta</td>'
-                f'<td style="{value_style}">{"Yes" if hp.use_unit_beta else "No"}</td></tr>'
+                f'<tr><td style="{label_style}">PLS Components</td>'
+                f'<td style="{value_style}">{n_comp_display}</td></tr>'
             )
-        model_html.append(
-            f'<tr><td style="{label_style}">L2 Normalize Docs</td>'
-            f'<td style="{value_style}">{"Yes" if hp.l2_normalize_docs else "No"}</td></tr>'
-        )
+            _pls_p_method = hp.get("pls_p_method", "auto")
+            model_html.append(
+                f'<tr><td style="{label_style}">p-value Method</td>'
+                f'<td style="{value_style}">{_pls_p_method}</td></tr>'
+            )
+            if _pls_p_method in ("perm", "auto"):
+                model_html.append(
+                    f'<tr><td style="{label_style}">n Permutations</td>'
+                    f'<td style="{value_style}">{hp.get("pls_n_perm", 1000):,}</td></tr>'
+                )
+            if _pls_p_method in ("split", "split_cal", "auto"):
+                model_html.append(
+                    f'<tr><td style="{label_style}">n Splits</td>'
+                    f'<td style="{value_style}">{hp.get("pls_n_splits", 100)}</td></tr>'
+                )
+                model_html.append(
+                    f'<tr><td style="{label_style}">Split Ratio</td>'
+                    f'<td style="{value_style}">{hp.get("pls_split_ratio", 0.5)}</td></tr>'
+                )
+            if hp.get("pls_pca_preprocess") is not None:
+                model_html.append(
+                    f'<tr><td style="{label_style}">PCA Preprocess</td>'
+                    f'<td style="{value_style}">{hp.get("pls_pca_preprocess")}</td></tr>'
+                )
+            model_html.append(
+                f'<tr><td style="{label_style}">Random State</td>'
+                f'<td style="{value_style}">{hp.get("pls_random_state", 42)}</td></tr>'
+            )
+
+        # PCA+OLS-specific
+        elif atype == "pca_ols":
+            _pcaols_n_comp = hp.get("pcaols_n_components")
+            n_comp_display = "sweep" if _pcaols_n_comp is None else _pcaols_n_comp
+            model_html.append(
+                f'<tr><td style="{label_style}">PCA Components</td>'
+                f'<td style="{value_style}">{n_comp_display}</td></tr>'
+            )
+            if _pcaols_n_comp is None:
+                model_html.append(
+                    f'<tr><td style="{label_style}">K Range</td>'
+                    f'<td style="{value_style}">{hp.get("sweep_k_min", 1)} \u2013 {hp.get("sweep_k_max", 50)} (step {hp.get("sweep_k_step", 1)})</td></tr>'
+                )
+
+        # Groups-specific
+        elif atype == "groups":
+            model_html.append(
+                f'<tr><td style="{label_style}">Permutations</td>'
+                f'<td style="{value_style}">{hp.get("groups_n_perm", 5000):,}</td></tr>'
+            )
+            model_html.append(
+                f'<tr><td style="{label_style}">Correction</td>'
+                f'<td style="{value_style}">{hp.get("groups_correction", "holm")}</td></tr>'
+            )
+            if hp.get("groups_median_split", False):
+                model_html.append(
+                    f'<tr><td style="{label_style}">Median Split</td>'
+                    f'<td style="{value_style}">Yes</td></tr>'
+                )
+            model_html.append(
+                f'<tr><td style="{label_style}">Random State</td>'
+                f'<td style="{value_style}">{hp.get("groups_random_state", 42)}</td></tr>'
+            )
+
         model_html.append("</table>")
 
         # Clustering section
@@ -2209,19 +2534,19 @@ class Stage3Widget(QWidget):
         model_html.append('<table cellspacing="6" style="width: 100%;">')
         model_html.append(
             f'<tr><td style="{label_style}">Top N</td>'
-            f'<td style="{value_style}">{hp.clustering_topn}</td></tr>'
+            f'<td style="{value_style}">{hp.get("clustering_topn", 100)}</td></tr>'
         )
         model_html.append(
             f'<tr><td style="{label_style}">Auto K</td>'
-            f'<td style="{value_style}">{"Yes (silhouette)" if hp.clustering_k_auto else "No"}</td></tr>'
+            f'<td style="{value_style}">{"Yes (silhouette)" if hp.get("clustering_k_auto", True) else "No"}</td></tr>'
         )
         model_html.append(
             f'<tr><td style="{label_style}">K Range</td>'
-            f'<td style="{value_style}">{hp.clustering_k_min} - {hp.clustering_k_max}</td></tr>'
+            f'<td style="{value_style}">{hp.get("clustering_k_min", 2)} - {hp.get("clustering_k_max", 10)}</td></tr>'
         )
         model_html.append(
             f'<tr><td style="{label_style}">Top Words</td>'
-            f'<td style="{value_style}">{hp.clustering_top_words}</td></tr>'
+            f'<td style="{value_style}">{hp.get("clustering_top_words", 5)}</td></tr>'
         )
         model_html.append("</table>")
 
@@ -2231,35 +2556,58 @@ class Stage3Widget(QWidget):
     #  PCA Sweep tab helpers
     # ------------------------------------------------------------------ #
 
-    def _load_pca_sweep_tab(self, run: Run):
+    def _load_pca_sweep_tab(self, result: Result):
         """Load the PCA sweep figure into the tab."""
-        selected_k = run.results.selected_k if run.results else None
+        selected_k = result._result.n_components if result._result and result._result.result_type == "pca_ols" else None
 
         if selected_k is not None:
             self.pca_sweep_info.setText(f"Selected PCA K: {selected_k}")
         else:
             self.pca_sweep_info.setText("PCA K was set manually (no sweep performed).")
 
-        # Try to load the sweep plot PNG from the run directory
-        sweep_png = run.run_path / "pca_sweep_sweep_plot.png"
-        if sweep_png.exists():
-            pixmap = QPixmap(str(sweep_png))
-            if not pixmap.isNull():
-                self._pca_sweep_pixmap = pixmap
-                # Restore saved zoom or default to fit-to-window (0)
-                settings = QSettings("SSD", "SSD")
-                saved = settings.value("pca_sweep_zoom_pct", 0, type=int)
-                self._pca_sweep_zoom_pct = saved
-                self._pca_sweep_apply_zoom()
-            else:
-                self._pca_sweep_pixmap = None
-                self.pca_sweep_image.setText("Failed to load sweep plot image.")
+        # Try to render sweep plot from saved data (or live result),
+        # then fall back to legacy sweep_plot.png from older runs.
+        pixmap = self._render_sweep_pixmap(result)
+        if pixmap is None:
+            sweep_png = result.result_path / "sweep_plot.png"
+            if sweep_png.exists():
+                candidate = QPixmap(str(sweep_png))
+                if not candidate.isNull():
+                    pixmap = candidate
+
+        if pixmap is not None:
+            self._pca_sweep_pixmap = pixmap
+            self._pca_sweep_zoom_pct = app_settings().value("pca_sweep_zoom_pct", 0, type=int)
+            self._pca_sweep_apply_zoom()
         else:
             self._pca_sweep_pixmap = None
             self.pca_sweep_image.setText(
                 "No sweep plot available.\n"
                 "This run may have used manual PCA K selection."
             )
+
+    @staticmethod
+    def _render_sweep_pixmap(result: Result):
+        """Render sweep chart from data. Returns QPixmap or None."""
+        from ..utils.charts import render_sweep_plot
+        import json
+
+        # Prefer live result data
+        sweep = getattr(result._result, "sweep_result", None) if result._result else None
+        if sweep is not None:
+            return render_sweep_plot(sweep.df_joined, sweep.best_k)
+
+        # Fall back to saved JSON
+        sweep_json = result.result_path / "sweep_data.json"
+        if sweep_json.exists():
+            try:
+                with open(sweep_json) as f:
+                    data = json.load(f)
+                return render_sweep_plot(data["rows"], data["best_k"])
+            except Exception:
+                pass
+
+        return None
 
     def _pca_sweep_apply_zoom(self):
         """Redraw the sweep image at the current zoom level."""
@@ -2313,8 +2661,7 @@ class Stage3Widget(QWidget):
 
     def _pca_sweep_save_zoom(self):
         """Persist the current zoom preference."""
-        settings = QSettings("SSD", "SSD")
-        settings.setValue("pca_sweep_zoom_pct", self._pca_sweep_zoom_pct)
+        app_settings().setValue("pca_sweep_zoom_pct", self._pca_sweep_zoom_pct)
 
     # ================================================================== #
     #  ACTIONS
@@ -2330,124 +2677,112 @@ class Stage3Widget(QWidget):
         """Request a new analysis run."""
         self.new_run_requested.emit()
 
-    def _open_export_options(self):
-        """Open the Export Options configuration dialog."""
-        from .export_options_dialog import ExportOptionsDialog
-        dlg = ExportOptionsDialog(self)
+    def _open_report_settings(self):
+        """Open the Report Settings configuration dialog."""
+        from .report_settings_dialog import ReportSettingsDialog
+        dlg = ReportSettingsDialog(self)
         dlg.exec()
-
-    def _export_all(self):
-        """Export all results."""
-        if not self.current_run or not self.project:
-            return
-
-        output_dir = QFileDialog.getExistingDirectory(
-            self, "Select Export Directory"
-        )
-        if not output_dir:
-            return
-
-        try:
-            exporter = ExportController(self.current_run, self.project)
-            result_path = exporter.export_all(Path(output_dir))
-
-            QMessageBox.information(
-                self,
-                "Export Complete",
-                f"All results exported to:\n{result_path}",
-            )
-        except Exception as e:
-            QMessageBox.critical(
-                self, "Export Error", f"Failed to export results:\n{e}"
-            )
 
     # ================================================================== #
     #  PUBLIC
     # ================================================================== #
 
+    def reset(self):
+        """Clear all state for project close."""
+        self.project = None
+        self.current_result = None
+        self._unsaved_result = None
+        self._is_viewing_unsaved = False
+
     def load_project(self, project: Project):
         """Load a project into the UI."""
         self.project = project
-        self._populate_run_selector()
+        self._populate_result_selector()
 
-    def show_unsaved_run(self, run: Run):
-        """Display a fresh (unsaved) run and enable the save controls."""
-        self._unsaved_run = run
+    def show_unsaved_result(self, result: Result):
+        """Display a fresh (unsaved) result and enable the save controls."""
+        self._unsaved_result = result
         self._is_viewing_unsaved = True
-        self._populate_run_selector()
-        # Selector index 0 is now the unsaved run — _populate already calls show_run
+        self._populate_result_selector()
+        # Selector index 0 is now the unsaved result — _populate already calls show_result
         self.run_name_input.clear()
 
-    def has_unsaved_run(self) -> bool:
-        """Return True if there is an unsaved run."""
-        return self._unsaved_run is not None
+    def has_unsaved_result(self) -> bool:
+        """Return True if there is an unsaved result."""
+        return self._unsaved_result is not None
 
-    def _save_run_to_archive(self):
-        """Save the current unsaved run with the user-given name."""
+    def _save_result(self):
+        """Add the unsaved result to the project."""
+        if self._unsaved_result is None or self.project is None:
+            return
+
+        result = self._unsaved_result
+
+        # Optional name from the text input
         name = self.run_name_input.text().strip()
-        if not name:
-            QMessageBox.warning(
-                self, "Name Required",
-                "Please enter a name for this run before saving.",
-            )
-            return
+        if name:
+            result.name = name
 
-        if self._unsaved_run is None or self.project is None:
-            return
+        # Add to project (in memory — Save Project persists to project.json)
+        self.project.results.append(result)
+        self.project.mark_dirty()
 
-        run = self._unsaved_run
-        run.name = name
-
-        # Persist run data
-        from ..utils.file_io import ProjectIO
-        self.project.runs.append(run)
-        ProjectIO.save_run_config(run)
-        ProjectIO.save_run_results(run)
-        ProjectIO.save_project(self.project)
+        # Save sweep plot PNG if available
+        if self._pca_sweep_pixmap is not None:
+            try:
+                sweep_png = result.result_path / "sweep_plot.png"
+                self._pca_sweep_pixmap.save(str(sweep_png), "PNG")
+            except Exception:
+                pass  # Non-critical
 
         # Clear unsaved state
-        self._unsaved_run = None
+        self._unsaved_result = None
         self._is_viewing_unsaved = False
 
-        # Rebuild selector and select the newly saved run
-        self._populate_run_selector()
-        # Find the saved run in the selector
-        for i in range(self.run_selector.count()):
-            if self.run_selector.itemData(i) is run:
-                self.run_selector.setCurrentIndex(i)
-                break
+        # Update the selector entry in-place (no full reload)
+        display_name = result.name or result.result_id
+        label = f"{display_name} ({result.result_id})"
+        self.result_selector.setItemText(self.result_selector.currentIndex(), label)
 
-        self.run_saved.emit()
+        # Hide save controls
+        self.run_name_input.hide()
+        self.save_result_btn.hide()
 
-    def _delete_run_by_index(self, row: int):
-        """Delete a saved run after confirmation."""
-        run = self.run_selector.itemData(row)
-        if run is None or run is self._unsaved_run:
+        self.result_saved.emit()
+
+    def _delete_result_by_index(self, row: int):
+        """Delete a saved result after confirmation."""
+        result = self.result_selector.itemData(row)
+        if result is None or result is self._unsaved_result:
             return
 
-        self.run_selector.hidePopup()
+        self.result_selector.hidePopup()
 
-        display_name = run.name or run.run_id
+        display_name = result.name or result.result_id
         reply = QMessageBox.question(
             self,
-            "Delete Run",
+            "Delete Result",
             f"Permanently delete \"{display_name}\"?\n\n"
-            "All results will be removed and this cannot be undone.",
+            "All data will be removed and this cannot be undone.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
 
-        if self.project and run in self.project.runs:
-            self.project.runs.remove(run)
+        if self.project and result in self.project.results:
+            self.project.results.remove(result)
 
-        import shutil
-        if run.run_path.exists():
-            shutil.rmtree(run.run_path)
+        if result.result_path.exists():
+            import subprocess
+            try:
+                subprocess.run(["trash-put", str(result.result_path)], check=True)
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                import shutil
+                shutil.rmtree(result.result_path)
 
         from ..utils.file_io import ProjectIO
         if self.project:
             ProjectIO.save_project(self.project)
 
-        self._populate_run_selector()
+        self._populate_result_selector()

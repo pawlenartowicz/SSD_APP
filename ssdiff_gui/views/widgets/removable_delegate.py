@@ -71,6 +71,12 @@ class RemovableItemDelegate(QStyledItemDelegate):
     # -- event filter for hover & click ------------------------------------
 
     def eventFilter(self, obj, event):
+        try:
+            return self._handle_event(obj, event)
+        except RuntimeError:
+            return False
+
+    def _handle_event(self, obj, event):
         if obj is self._combo.view().viewport():
             if event.type() == QEvent.MouseMove:
                 idx = self._combo.view().indexAt(event.pos())

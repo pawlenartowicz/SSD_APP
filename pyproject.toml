@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ssd-app"
+version = "2.0.0"
+description = "Desktop GUI for Supervised Semantic Differential analysis"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.10"
+authors = [
+    {name = "Hubert Plisiecki", email = "hplisiecki@gmail.com"},
+    {name = "Paweł Lenartowicz", email = "pawellenartowicz@europe.com"},
+]
+
+dependencies = [
+    "ssdiff>=1.0.0",
+    "PySide6-Essentials>=6.6.0",
+    "pandas>=2.0.0",
+    "numpy>=1.26.4",
+    "openpyxl>=3.1.0",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.0.0",
+]
+
+[project.scripts]
+ssd-app = "ssdiff_gui.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: needs spaCy model + ssdiff computation (deselect with '-m \"not slow\"')",
+    "spacy: needs spaCy + en_core_web_sm model (auto-installed if possible)",
+]
+
+[tool.setuptools.packages.find]
+include = ["ssdiff_gui*"]

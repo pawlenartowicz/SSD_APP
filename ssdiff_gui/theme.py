@@ -414,22 +414,20 @@ def scale_font_sizes(palette: ThemePalette, base_px: int) -> ThemePalette:
 
 def get_saved_theme_name() -> str:
     """Return the persisted theme name (or 'Midnight')."""
-    from PySide6.QtCore import QSettings
-    s = QSettings("SSD", "SSD")
-    return s.value("appearance/theme", "Midnight")
+    from .utils.settings import app_settings
+    return app_settings().value("appearance/theme", "Midnight")
 
 
 def get_saved_font_size() -> int:
     """Return the persisted base font size in px (or 13)."""
-    from PySide6.QtCore import QSettings
-    s = QSettings("SSD", "SSD")
-    return int(s.value("appearance/font_size", 13))
+    from .utils.settings import app_settings
+    return int(app_settings().value("appearance/font_size", 13))
 
 
 def save_appearance(theme_name: str, font_size: int) -> None:
     """Persist theme + font choices."""
-    from PySide6.QtCore import QSettings
-    s = QSettings("SSD", "SSD")
+    from .utils.settings import app_settings
+    s = app_settings()
     s.setValue("appearance/theme", theme_name)
     s.setValue("appearance/font_size", font_size)
 
@@ -658,6 +656,35 @@ QPushButton#btn_export {{
 }}
 QPushButton#btn_export:hover {{
     background-color: {p.accent_hover};
+}}
+
+/* Model selection toggle buttons */
+QPushButton#btn_model_select {{
+    font-size: {p.font_size_base};
+    font-weight: 600;
+    padding: 6px 20px;
+    border-radius: {p.radius_md};
+    background-color: {p.bg_hover};
+    color: {p.text_secondary};
+    border: 1px solid {p.border};
+}}
+QPushButton#btn_model_select:hover {{
+    background-color: {p.bg_elevated};
+    color: {p.text_primary};
+    border-color: {p.text_muted};
+}}
+QPushButton#btn_model_select_active {{
+    font-size: {p.font_size_base};
+    font-weight: 600;
+    padding: 6px 20px;
+    border-radius: {p.radius_md};
+    background-color: {p.accent};
+    color: {p.text_on_accent};
+    border: 1px solid {p.accent};
+}}
+QPushButton#btn_model_select_active:hover {{
+    background-color: {p.accent_hover};
+    border-color: {p.accent_hover};
 }}
 
 /* --- Input Fields --- */
