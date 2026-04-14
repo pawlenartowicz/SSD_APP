@@ -38,9 +38,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install . pyinstaller
 
-      - name: Install ssdiff
-        run: pip install ssdiff
-
       - name: Generate macOS icon
         if: runner.os == 'macOS'
         run: |
