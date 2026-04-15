@@ -2345,11 +2345,11 @@ class Stage3Widget(QWidget):
                     concept_html.append("<td>Word</td><td>Docs</td><td>Coverage</td><td>Correlation</td></tr>")
 
                 for t in result.config_snapshot["lexicon_coverage_per_token"]:
-                    corr = t.get("corr", t.get("cramers_v", 0))
+                    corr = t.get("corr", 0)
                     corr_color = p.success if corr > 0 else p.error if corr < 0 else p.text_secondary
                     concept_html.append(
-                        f'<tr><td style="font-weight: 500;">{t.get("word", "")}</td>'
-                        f'<td>{t.get("docs", 0):,}</td>'
+                        f'<tr><td style="font-weight: 500;">{t.get("token", "")}</td>'
+                        f'<td>{t.get("freq", 0):,}</td>'
                         f'<td>{t.get("cov_all", 0) * 100:.1f}%</td>'
                         f'<td style="color: {corr_color};">{corr:+.4f}</td></tr>'
                     )

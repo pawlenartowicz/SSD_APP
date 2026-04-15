@@ -153,7 +153,7 @@ class SSDRunner(QThread):
 
         return ssd, pre_docs
 
-    def _compute_coverage(self, docs, y, var_type="continuous"):
+    def _compute_coverage(self, var_type="continuous"):
         """Compute lexicon coverage if in lexicon mode."""
         if self.project.concept_mode != "lexicon":
             return None, None
@@ -162,10 +162,23 @@ class SSDRunner(QThread):
         if not lexicon:
             return None, None
 
+        corpus = self.project._corpus
+        if corpus is None:
+            return None, None
+
+        if var_type == "categorical":
+            y_full = getattr(self.project, "_groups_full", None)
+        else:
+            y_full = getattr(self.project, "_y_full", None)
+        if y_full is None:
+            return None, None
+
         try:
-            from ssdiff.utils.lexicon import coverage_by_lexicon
-            cov_summary, cov_per_token = coverage_by_lexicon(
-                (docs, y), lexicon=lexicon, var_type=var_type,
+            cov_summary = corpus.coverage_summary(
+                y_full, lexicon, var_type=var_type,
+            )
+            cov_per_token = corpus.token_stats(
+                y_full, lexicon, var_type=var_type,
             )
             return cov_summary, cov_per_token
         except Exception as e:
@@ -232,9 +245,7 @@ class SSDRunner(QThread):
 
         # Coverage
         self.progress.emit(10, "Computing lexicon coverage...")
-        cov_summary, cov_per_token = self._compute_coverage(
-            self.project._docs, self.project._y,
-        )
+        cov_summary, cov_per_token = self._compute_coverage()
 
         if self._is_cancelled:
             return
@@ -291,9 +302,7 @@ class SSDRunner(QThread):
 
         # Coverage
         self.progress.emit(10, "Computing lexicon coverage...")
-        cov_summary, cov_per_token = self._compute_coverage(
-            self.project._docs, self.project._y,
-        )
+        cov_summary, cov_per_token = self._compute_coverage()
 
         if self._is_cancelled:
             return
@@ -362,7 +371,6 @@ class SSDRunner(QThread):
         # Coverage
         self.progress.emit(10, "Computing lexicon coverage...")
         cov_summary, cov_per_token = self._compute_coverage(
-            self.project._docs, self.project._groups,
             var_type="categorical",
         )
 

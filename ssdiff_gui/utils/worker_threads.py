@@ -574,40 +574,41 @@ class UpdateCheckWorker(QThread):
 
 
 class CoverageWorker(QThread):
-    """Worker thread for computing lexicon coverage."""
+    """Worker thread for computing lexicon coverage via Corpus methods."""
 
     progress = Signal(int, str)
-    finished = Signal(dict, object)  # summary, per_token_df
+    finished = Signal(dict, object)  # summary, per_token
     error = Signal(str)
 
     def __init__(
         self,
-        docs: List[List[str]],
-        y: Any,
+        corpus,
+        y_full,
         lexicon: set,
+        *,
+        var_type: str = "continuous",
         parent=None,
     ):
         super().__init__(parent)
-        self.docs = docs
-        self.y = y
+        self.corpus = corpus
+        self.y_full = y_full
         self.lexicon = lexicon
+        self.var_type = var_type
 
     def run(self):
         """Compute coverage statistics."""
         try:
-            from ssdiff.utils.lexicon import coverage_by_lexicon
-
             self.progress.emit(50, "Computing coverage...")
 
-            summary, per_token_df = coverage_by_lexicon(
-                (self.docs, self.y),
-                lexicon=self.lexicon,
-                n_bins=4,
-                verbose=False,
+            summary = self.corpus.coverage_summary(
+                self.y_full, self.lexicon, var_type=self.var_type,
+            )
+            per_token = self.corpus.token_stats(
+                self.y_full, self.lexicon, var_type=self.var_type,
             )
 
             self.progress.emit(100, "Complete!")
-            self.finished.emit(summary, per_token_df)
+            self.finished.emit(summary, per_token)
 
         except Exception as e:
             self.error.emit(f"Coverage computation failed: {str(e)}")

@@ -628,7 +628,9 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         if not col or col == "(none)":
             self.column_summary_label.setText("")
             self.project._y = None
+            self.project._y_full = None
             self.project._groups = None
+            self.project._groups_full = None
             self._update_suggestions_btn_state()
             self._update_run_button()
             return
@@ -661,22 +663,27 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
             y_series = pd.Series(y_list)
             n_valid = (~y_series.isna()).sum()
             y = y_series.dropna().to_numpy()
+            y_full = y_series.to_numpy(dtype=np.float64)
         else:
             n_valid = (~outcome.isna()).sum()
             y = outcome.dropna().to_numpy()
+            y_full = outcome.to_numpy(dtype=np.float64)
 
         if n_valid > 0:
             self.column_summary_label.setText(
                 f"n={n_valid:,}, mean={y.mean():.3f}, std={y.std():.3f}"
             )
             self.project._y = y
+            self.project._y_full = y_full
             self.project._groups = None
+            self.project._groups_full = None
             self.project.outcome_column = col
             self.project.n_valid = int(n_valid)
             self._apply_outcome_filter(col)
         else:
             self.column_summary_label.setText("No valid numeric values")
             self.project._y = None
+            self.project._y_full = None
 
     def _apply_outcome_filter(self, col: str):
         """Filter cached docs to match rows/profiles with valid outcome."""
@@ -736,6 +743,7 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
 
         self.project._groups = groups.to_numpy()
         self.project._y = None
+        self.project._y_full = None
         self.project.group_column = col
         self._apply_group_filter(col)
 
@@ -766,12 +774,21 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
             self.project._docs = [all_docs[i] for i, ok in enumerate(per_id_valid) if ok]
             self.project._pre_docs = [all_pre_docs[i] for i, ok in enumerate(per_id_valid) if ok]
             self.project._groups = np.array([g for g, ok in zip(per_id_group_vals, per_id_valid) if ok])
+            # Full-length groups aligned with corpus.docs (None for invalid)
+            self.project._groups_full = np.array(
+                [g if ok else None for g, ok in zip(per_id_group_vals, per_id_valid)],
+                dtype=object,
+            )
         else:
             groups = df[col]
             mask = ~(groups.isna() | (groups.astype(str).str.strip() == ""))
             self.project._docs = [all_docs[i] for i in range(len(all_docs)) if mask.iat[i]]
             self.project._pre_docs = [all_pre_docs[i] for i in range(len(all_pre_docs)) if mask.iat[i]]
             self.project._groups = groups[mask].astype(str).to_numpy()
+            # Full-length groups aligned with corpus.docs (None for invalid)
+            groups_full = groups.astype(str).to_numpy().copy()
+            groups_full[~mask.to_numpy()] = None
+            self.project._groups_full = np.array(groups_full, dtype=object)
         self.project._y = None
 
     def _create_current_lexicon_panel(self) -> QGroupBox:
@@ -1329,6 +1346,30 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
                 return None, None, None
             return docs, y, "continuous"
 
+    def _get_corpus_y(self):
+        """Return (corpus, y_full, var_type) for Corpus lexicon methods.
+
+        ``y_full`` is aligned with ``corpus.docs`` (same length, NaN/None
+        for invalid entries).  Returns ``(None, None, None)`` if data is
+        not ready.
+        """
+        if not self.project:
+            return None, None, None
+        corpus = self.project._corpus
+        if corpus is None or not corpus.docs:
+            return None, None, None
+
+        if self._is_crossgroup():
+            groups_full = getattr(self.project, "_groups_full", None)
+            if groups_full is None:
+                return None, None, None
+            return corpus, groups_full, "categorical"
+        else:
+            y_full = getattr(self.project, "_y_full", None)
+            if y_full is None:
+                return None, None, None
+            return corpus, y_full, "continuous"
+
     def _update_coverage(self):
         """Update coverage statistics in the current lexicon table."""
         if not self.project or not self.lexicon:
@@ -1337,23 +1378,25 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
             self._update_run_button()
             return
 
-        docs, var, var_type = self._get_coverage_data()
-        if docs is None or var is None:
+        corpus, y_full, var_type = self._get_corpus_y()
+        if corpus is None or y_full is None:
             self.coverage_stats.setText("Data not loaded or column not selected")
             self._update_run_button()
             return
 
         try:
-            from ssdiff.utils.lexicon import coverage_by_lexicon
-            summary, per_token = coverage_by_lexicon(
-                (docs, var), lexicon=self.lexicon, var_type=var_type
+            per_token = corpus.token_stats(
+                y_full, self.lexicon, var_type=var_type,
+            )
+            summary = corpus.coverage_summary(
+                y_full, self.lexicon, var_type=var_type,
             )
         except Exception as e:
             self.coverage_stats.setText(f"Coverage computation failed: {e}")
             self._update_run_button()
             return
 
-        n_docs = len(docs)
+        n_docs = len(self.project._docs) if self.project._docs else len(corpus.docs)
         cov_pct = summary["cov_all"] * 100
 
         if var_type == "categorical":
@@ -1393,7 +1436,7 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
             warnings.append("Small lexicon (< 5 tokens)")
         if cov_pct < 30:
             warnings.append(f"Low coverage ({cov_pct:.1f}%)")
-        zero_freq = [row for row in per_token if row.get("frequency", 0) == 0]
+        zero_freq = [row for row in per_token if row.get("freq", 0) == 0]
         if zero_freq:
             oov_words = ", ".join(row["token"] for row in zero_freq[:5])
             warnings.append(
@@ -1410,61 +1453,55 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         self.coverage_warnings.style().polish(self.coverage_warnings)
 
         # Fill stats into the existing lexicon table rows
-        token_stats = {row.get("token", ""): row for row in per_token}
+        stats_by_token = {row.get("token", ""): row for row in per_token}
         self.lexicon_table.setSortingEnabled(False)
         for i in range(self.lexicon_table.rowCount()):
             token_item = self.lexicon_table.item(i, 0)
             if not token_item:
                 continue
             token = token_item.text()
-            row = token_stats.get(token, {})
+            row = stats_by_token.get(token, {})
             self.lexicon_table.setItem(
-                i, 1, QTableWidgetItem(str(row.get("frequency", 0)))
+                i, 1, QTableWidgetItem(str(row.get("freq", 0)))
             )
             self.lexicon_table.setItem(
-                i, 2, QTableWidgetItem(f"{row.get('association', 0):.4f}")
+                i, 2, QTableWidgetItem(f"{row.get('corr', 0):.4f}")
             )
             self.lexicon_table.setItem(
                 i, 3, QTableWidgetItem(f"{row.get('pvalue', 1.0):.4g}")
             )
             self.lexicon_table.setItem(
-                i, 4, QTableWidgetItem(str(row.get("effect_direction", "")))
+                i, 4, QTableWidgetItem(str(row.get("direction", "")))
             )
         self.lexicon_table.setSortingEnabled(True)
 
         self._update_run_button()
 
     def _update_suggestions(self):
-        """Update the suggestions table using ssdiff's suggest_lexicon."""
+        """Update the suggestions table using Corpus.suggest_lexicon."""
         self.suggestions_table.setRowCount(0)
 
         if not self.project:
             return
 
-        docs, var, var_type = self._get_coverage_data()
-        if docs is None or var is None:
+        corpus, y_full, var_type = self._get_corpus_y()
+        if corpus is None or y_full is None:
             return
 
         try:
-            from ssdiff.utils.lexicon import suggest_lexicon, coverage_by_lexicon
-
-            # Get token suggestions (returns list[str])
-            suggested_tokens = suggest_lexicon(
-                (docs, var), var_type=var_type
+            # suggest_lexicon returns LexiconResult (iterable of dicts)
+            suggested = corpus.suggest_lexicon(
+                y_full, var_type=var_type,
             )
 
             # Filter out tokens already in the lexicon
-            suggested_tokens = [t for t in suggested_tokens if t not in self.lexicon][:50]
+            suggested = [
+                row for row in suggested
+                if row["token"] not in self.lexicon
+            ][:50]
 
-            if not suggested_tokens:
+            if not suggested:
                 return
-
-            # Get per-token stats by running coverage on suggested tokens
-            _, per_token_stats = coverage_by_lexicon(
-                (docs, var), lexicon=set(suggested_tokens), var_type=var_type
-            )
-            # Build a lookup by token
-            stats_by_word = {row["token"]: row for row in per_token_stats}
 
         except Exception as e:
             QMessageBox.warning(
@@ -1481,23 +1518,22 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
                 "Token", "Freq", "Assoc (r)", "p-value", "Direction",
             ])
 
-        self.suggestions_table.setRowCount(len(suggested_tokens))
-        for i, token in enumerate(suggested_tokens):
-            row = stats_by_word.get(token, {})
+        self.suggestions_table.setRowCount(len(suggested))
+        for i, row in enumerate(suggested):
             self.suggestions_table.setItem(
-                i, 0, QTableWidgetItem(token)
+                i, 0, QTableWidgetItem(row["token"])
             )
             self.suggestions_table.setItem(
-                i, 1, QTableWidgetItem(str(row.get("frequency", 0)))
+                i, 1, QTableWidgetItem(str(row.get("freq", 0)))
             )
             self.suggestions_table.setItem(
-                i, 2, QTableWidgetItem(f"{row.get('association', 0):.4f}")
+                i, 2, QTableWidgetItem(f"{row.get('corr', 0):.4f}")
             )
             self.suggestions_table.setItem(
                 i, 3, QTableWidgetItem(f"{row.get('pvalue', 1.0):.4g}")
             )
             self.suggestions_table.setItem(
-                i, 4, QTableWidgetItem(str(row.get("effect_direction", "")))
+                i, 4, QTableWidgetItem(str(row.get("direction", "")))
             )
 
     # ------------------------------------------------------------------ #
