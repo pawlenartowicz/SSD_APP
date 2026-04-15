@@ -220,6 +220,8 @@ class SSDRunner(QThread):
 
     def _run_pls(self, result: Result):
         _ensure_streams()
+        from ssdiff import progress_hook
+        from ..utils.progress import make_progress_cb
         p = self.project
 
         self.progress.emit(5, "Building SSD model...")
@@ -244,15 +246,17 @@ class SSDRunner(QThread):
 
         self.progress.emit(15, f"Fitting PLS (n_comp={n_comp}, p_method={p_method})...")
 
-        ssd_result = ssd.fit_pls(
-            n_components=n_comp,
-            pca_preprocess=p.pls_pca_preprocess,
-            p_method=p_method,
-            n_perm=p.pls_n_perm,
-            n_splits=p.pls_n_splits,
-            split_ratio=p.pls_split_ratio,
-            random_state=random_state,
-        )
+        cb = make_progress_cb(self.progress, 15, 55, "Fitting PLS")
+        with progress_hook(cb):
+            ssd_result = ssd.fit_pls(
+                n_components=n_comp,
+                pca_preprocess=p.pls_pca_preprocess,
+                p_method=p_method,
+                n_perm=p.pls_n_perm,
+                n_splits=p.pls_n_splits,
+                split_ratio=p.pls_split_ratio,
+                random_state=random_state,
+            )
 
         if self._is_cancelled:
             return
@@ -265,7 +269,7 @@ class SSDRunner(QThread):
         if self._is_cancelled:
             return
 
-        self.progress.emit(90, "Saving results...")
+        self.progress.emit(85, "Saving results...")
         self._finalize_result(result, ssd_result,
                               cov_summary=cov_summary, cov_per_token=cov_per_token)
 
@@ -275,6 +279,8 @@ class SSDRunner(QThread):
 
     def _run_pca_ols(self, result: Result):
         _ensure_streams()
+        from ssdiff import progress_hook
+        from ..utils.progress import make_progress_cb
         p = self.project
 
         self.progress.emit(5, "Building SSD model...")
@@ -295,19 +301,21 @@ class SSDRunner(QThread):
         # Resolve parameters
         n_comp = p.pcaols_n_components  # None = sweep
         sweep_msg = "sweep" if n_comp is None else f"K={n_comp}"
-        self.progress.emit(15, f"Fitting PCA+OLS ({sweep_msg})...")
+        self.progress.emit(10, f"Fitting PCA+OLS ({sweep_msg})...")
 
-        ssd_result = ssd.fit_ols(
-            n_components=n_comp,
-            k_min=p.sweep_k_min,
-            k_max=p.sweep_k_max,
-            k_step=p.sweep_k_step,
-        )
+        cb = make_progress_cb(self.progress, 10, 45, "PCA sweep")
+        with progress_hook(cb):
+            ssd_result = ssd.fit_ols(
+                n_components=n_comp,
+                k_min=p.sweep_k_min,
+                k_max=p.sweep_k_max,
+                k_step=p.sweep_k_step,
+            )
 
         if self._is_cancelled:
             return
 
-        self.progress.emit(50, "Saving sweep data...")
+        self.progress.emit(45, "Saving sweep data...")
 
         # Save sweep data as JSON (rendered in the GUI via QPainter)
         if ssd_result.sweep_result is not None:
@@ -323,7 +331,7 @@ class SSDRunner(QThread):
             except Exception as e:
                 _debug_log(f"[pca_ols] Sweep data save failed: {e}\n{traceback.format_exc()}")
 
-        self.progress.emit(55, "Caching interpretation data...")
+        self.progress.emit(50, "Caching interpretation data...")
 
         # Cache interpretation on the ssdiff result
         self._cache_interpretation(ssd_result, pre_docs, p)
@@ -331,7 +339,7 @@ class SSDRunner(QThread):
         if self._is_cancelled:
             return
 
-        self.progress.emit(90, "Saving results...")
+        self.progress.emit(80, "Saving results...")
         self._finalize_result(result, ssd_result,
                               cov_summary=cov_summary, cov_per_token=cov_per_token)
 
@@ -341,6 +349,8 @@ class SSDRunner(QThread):
 
     def _run_groups(self, result: Result):
         _ensure_streams()
+        from ssdiff import progress_hook
+        from ..utils.progress import make_progress_cb
         p = self.project
 
         self.progress.emit(5, "Building SSD model...")
@@ -361,26 +371,28 @@ class SSDRunner(QThread):
 
         random_state = self._resolve_random_state(p.groups_random_state)
 
-        self.progress.emit(15, f"Fitting group comparison (n_perm={p.groups_n_perm})...")
+        self.progress.emit(10, f"Fitting group comparison (n_perm={p.groups_n_perm})...")
 
-        ssd_result = ssd.fit_groups(
-            median_split=p.groups_median_split,
-            n_perm=p.groups_n_perm,
-            correction=p.groups_correction,
-            random_state=random_state,
-        )
+        cb = make_progress_cb(self.progress, 10, 55, "Permutation test")
+        with progress_hook(cb):
+            ssd_result = ssd.fit_groups(
+                median_split=p.groups_median_split,
+                n_perm=p.groups_n_perm,
+                correction=p.groups_correction,
+                random_state=random_state,
+            )
 
         if self._is_cancelled:
             return
 
-        self.progress.emit(50, "Caching interpretation data...")
+        self.progress.emit(55, "Caching interpretation data...")
 
         self._cache_interpretation(ssd_result, pre_docs, p)
 
         if self._is_cancelled:
             return
 
-        self.progress.emit(90, "Saving results...")
+        self.progress.emit(85, "Saving results...")
         self._finalize_result(result, ssd_result,
                               cov_summary=cov_summary, cov_per_token=cov_per_token)
 

@@ -711,9 +711,6 @@ class MainWindow(QMainWindow):
         """Handle progress updates from runner."""
         if hasattr(self, 'progress_dialog'):
             self.progress_dialog.update_progress(percent, message)
-            # Start faux progress during PCA sweep (blocks at 15% until ~40%)
-            if "PCA sweep" in message:
-                self.progress_dialog.start_faux_progress(15, 40, message)
 
     def _on_run_finished(self, result):
         """Handle run completion — show as unsaved, don't persist yet."""

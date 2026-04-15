@@ -240,10 +240,13 @@ class EmbeddingPrepareWorker(QThread):
 
     def run(self):
         try:
-            from ssdiff import Embeddings
+            from ssdiff import Embeddings, progress_hook
+            from .progress import make_progress_cb
 
-            self.progress.emit(10, "Loading embeddings file...")
-            emb = Embeddings.load(str(self.source_path))
+            self.progress.emit(5, "Loading embeddings file...")
+            cb = make_progress_cb(self.progress, 5, 55, "Loading embeddings")
+            with progress_hook(cb):
+                emb = Embeddings.load(str(self.source_path))
 
             if self._is_cancelled:
                 return
@@ -257,10 +260,10 @@ class EmbeddingPrepareWorker(QThread):
             )
 
             if needs_normalize:
-                self.progress.emit(40, "Normalizing embeddings...")
+                self.progress.emit(55, "Normalizing embeddings...")
                 emb.normalize(l2=self.l2_normalize, abtt_m=self.abtt_m)
             else:
-                self.progress.emit(40, "Normalization already applied.")
+                self.progress.emit(55, "Normalization already applied.")
 
             if self._is_cancelled:
                 return
@@ -284,7 +287,7 @@ class EmbeddingPrepareWorker(QThread):
             self.output_dir.mkdir(parents=True, exist_ok=True)
             out_stem_path = str(self.output_dir / out_stem)
 
-            self.progress.emit(70, "Saving prepared embedding...")
+            self.progress.emit(70, "Saving prepared embedding (.ssdembed)...")
             # save() appends ".ssdembed" to the stem
             emb.save(out_stem_path)
 
@@ -295,6 +298,7 @@ class EmbeddingPrepareWorker(QThread):
             if self._is_cancelled:
                 return
 
+            self.progress.emit(95, "Computing metadata...")
             # Collect metadata (include sidecar size)
             sidecar = Path(str(out_path) + ".vectors.npy")
             total_bytes = out_path.stat().st_size
