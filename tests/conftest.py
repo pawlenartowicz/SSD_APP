@@ -30,6 +30,13 @@ for mod_name in _QT_MODULES:
             mock.QThread = type("QThread", (), {})
             mock.Signal = MagicMock(return_value=MagicMock())
             mock.QSettings = MagicMock()
+        # Qt widget base classes must be real types so they can be subclassed
+        if mod_name == "PySide6.QtWidgets":
+            for _qt_cls in (
+                "QWidget", "QFrame", "QDialog", "QLabel",
+                "QMainWindow", "QStyledItemDelegate",
+            ):
+                setattr(mock, _qt_cls, type(_qt_cls, (), {}))
         sys.modules[mod_name] = mock
 
 # ── Ensure ssdiff_gui is importable ─────────────────────────────────

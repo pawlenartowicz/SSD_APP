@@ -28,10 +28,11 @@ class _NumpyEncoder(json.JSONEncoder):
 
 
 def _strip_embeddings(result_obj) -> None:
-    """Detach heavy Embeddings reference from a deserialized ssdiff result.
+    """Detach the Embeddings reference from a deserialized ssdiff result.
 
-    Old pickles may contain a full copy; the project's loaded Embeddings
-    will be re-attached on demand.
+    Results are saved with embeddings nulled out; this defensively clears
+    the field again on load so the project's shared Embeddings can be
+    re-attached on demand.
     """
     if result_obj is not None and hasattr(result_obj, "embeddings"):
         result_obj.embeddings = None
@@ -46,7 +47,12 @@ class ProjectIO:
 
     @staticmethod
     def save_project(project: Project) -> None:
-        """Save project to project.json and each result's config."""
+        """Save project to project.json and each result's config.
+
+        Entries that can't be written to disk (orphans, missing folders,
+        load-broken folders) are skipped — their configs live in their
+        own folders or simply don't exist on disk yet.
+        """
         project.modified_date = datetime.now()
 
         project_dict = project.to_dict()
@@ -56,11 +62,22 @@ class ProjectIO:
             json.dump(project_dict, f, indent=2, ensure_ascii=False, cls=_NumpyEncoder)
 
         for result in project.results:
+            if result.is_orphan or result.load_error or result.result_path is None:
+                continue
+            if not result.result_path.exists():
+                continue
             ProjectIO.save_result_config(result)
 
     @staticmethod
     def load_project(project_path: Path) -> Project:
-        """Load project from project.json."""
+        """Load project from project.json.
+
+        The list in project.json is treated as the set of *tracked* folder
+        names. The filesystem under results/ is the source of truth for
+        what actually exists: missing folders become "missing" markers,
+        extra folders become orphans (shown in the UI but not persisted
+        until the user opens them).
+        """
         project_file = project_path / "project.json"
 
         with open(project_file, "r", encoding="utf-8") as f:
@@ -68,39 +85,105 @@ class ProjectIO:
 
         project = Project.from_dict(project_dict, project_path)
 
-        # Load results
-        result_ids = project_dict.get("results", [])
-        for result_id in result_ids:
-            try:
-                result_path = project_path / "results" / result_id
-                if result_path.exists():
-                    config_file = result_path / "config.json"
-                    if config_file.exists():
-                        with open(config_file, "r", encoding="utf-8") as f:
-                            result_dict = json.load(f)
-                        result = Result.from_dict(result_dict, result_path)
-                    else:
-                        result = Result(
-                            result_id=result_id,
-                            timestamp=datetime.now(),
-                            result_path=result_path,
-                            config_snapshot={},
-                            status="unknown",
-                        )
-                    # Load pickled result object if available
-                    results_pkl = result_path / "results.pkl"
-                    if results_pkl.exists() and result.status == "complete":
-                        try:
-                            with open(results_pkl, "rb") as f:
-                                result._result = pickle.load(f)
-                            _strip_embeddings(result._result)
-                        except Exception as e:
-                            print(f"Warning: Failed to load results for {result_id}: {e}")
-                    project.results.append(result)
-            except Exception as e:
-                print(f"Warning: Failed to load result {result_id}: {e}")
+        tracked = list(project_dict.get("results", []))
+        tracked_set = set(tracked)
+        results_dir = project_path / "results"
+
+        # Tracked entries — preserve the order from project.json
+        for folder_name in tracked:
+            result = ProjectIO._materialize_tracked_result(
+                results_dir, folder_name,
+            )
+            if result is not None:
+                project.results.append(result)
+
+        # Orphans — any extra subdir on disk that loads cleanly. Broken
+        # orphans are silently ignored per spec.
+        if results_dir.exists():
+            orphan_results = []
+            for child in results_dir.iterdir():
+                if not child.is_dir() or child.name in tracked_set:
+                    continue
+                orphan = ProjectIO._try_load_result_folder(child)
+                if orphan is None:
+                    continue  # broken orphan → ignore
+                orphan.is_orphan = True
+                orphan_results.append(orphan)
+            # Newest-first by timestamp, appended after tracked entries
+            orphan_results.sort(key=lambda r: r.timestamp, reverse=True)
+            project.results.extend(orphan_results)
 
         return project
+
+    @staticmethod
+    def _materialize_tracked_result(
+        results_dir: Path, folder_name: str,
+    ) -> Optional[Result]:
+        """Build a Result for a tracked folder, handling missing/broken cases."""
+        result_path = results_dir / folder_name
+        if not result_path.exists():
+            # Missing: keep as a marker so the user can see it was tracked
+            # and prune it via the X button.
+            return Result(
+                result_id=folder_name,
+                timestamp=datetime.now(),
+                result_path=None,
+                folder_name=folder_name,
+                config_snapshot={},
+                status="missing",
+                load_error="Folder not found on disk",
+            )
+
+        try:
+            result = ProjectIO._load_result_folder(result_path)
+            if not result.folder_name:
+                result.folder_name = folder_name
+            return result
+        except Exception as e:
+            # Broken this session: folder exists but can't load. Don't
+            # persist anything extra — flag stays runtime-only.
+            return Result(
+                result_id=folder_name,
+                timestamp=datetime.now(),
+                result_path=result_path,
+                folder_name=folder_name,
+                config_snapshot={},
+                status="error",
+                load_error=str(e),
+            )
+
+    @staticmethod
+    def _try_load_result_folder(result_path: Path) -> Optional[Result]:
+        """Return a loaded Result or None if the folder can't be loaded."""
+        try:
+            return ProjectIO._load_result_folder(result_path)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _load_result_folder(result_path: Path) -> Result:
+        """Load a single result folder (config.json + results.pkl).
+
+        Raises on any failure. Used for both tracked-result loading and
+        for the Import Results flow in the UI.
+        """
+        config_file = result_path / "config.json"
+        results_pkl = result_path / "results.pkl"
+        if not config_file.exists():
+            raise FileNotFoundError(f"Missing config.json in {result_path}")
+        if not results_pkl.exists():
+            raise FileNotFoundError(f"Missing results.pkl in {result_path}")
+
+        with open(config_file, "r", encoding="utf-8") as f:
+            result_dict = json.load(f)
+        result = Result.from_dict(result_dict, result_path)
+        if not result.folder_name:
+            result.folder_name = result_path.name
+
+        with open(results_pkl, "rb") as f:
+            result._result = pickle.load(f)
+        _strip_embeddings(result._result)
+        return result
 
     @staticmethod
     def create_project_structure(project_path: Path) -> None:
@@ -108,7 +191,6 @@ class ProjectIO:
         project_path.mkdir(parents=True, exist_ok=True)
         (project_path / "data").mkdir(exist_ok=True)
         (project_path / "results").mkdir(exist_ok=True)
-        (project_path / "embeddings").mkdir(exist_ok=True)
 
     # ------------------------------------------------------------------ #
     #  Results
@@ -142,17 +224,20 @@ class ProjectIO:
 
             # Generate human-readable report from report settings
             try:
+                from ssdiff import GroupResult
                 from .report_settings import (
                     get_report_setting,
                     KEY_TOP_WORDS, KEY_CLUSTERS,
                     KEY_EXTREME_DOCS, KEY_MISDIAGNOSED,
                 )
-                report_text = result._result.report(
-                    top_words=get_report_setting(KEY_TOP_WORDS) or None,
-                    clusters=get_report_setting(KEY_CLUSTERS) or None,
-                    extreme_docs=get_report_setting(KEY_EXTREME_DOCS) or None,
-                    misdiagnosed=get_report_setting(KEY_MISDIAGNOSED) or None,
-                )
+                kwargs = {
+                    "top_words": get_report_setting(KEY_TOP_WORDS) or None,
+                    "clusters": get_report_setting(KEY_CLUSTERS) or None,
+                }
+                if not isinstance(result._result, GroupResult):
+                    kwargs["extreme_docs"] = get_report_setting(KEY_EXTREME_DOCS) or None
+                    kwargs["misdiagnosed"] = get_report_setting(KEY_MISDIAGNOSED) or None
+                report_text = str(result._result.report(**kwargs))
                 report_path = result.result_path / "results.txt"
                 report_path.write_text(report_text, encoding="utf-8")
             except Exception:
@@ -192,14 +277,9 @@ class ProjectIO:
                 result.status = "error"
                 result.error_message = f"Results file not found: {results_pkl}"
             else:
-                try:
-                    with open(results_pkl, "rb") as f:
-                        result._result = pickle.load(f)
-                    _strip_embeddings(result._result)
-                except Exception as e:
-                    result.status = "error"
-                    result.error_message = f"Failed to load results: {e}"
-                    result._result = None
+                with open(results_pkl, "rb") as f:
+                    result._result = pickle.load(f)
+                _strip_embeddings(result._result)
 
         return result
 
@@ -246,12 +326,13 @@ class ProjectIO:
 
     @staticmethod
     def list_prepared_embeddings(project: Project) -> List[dict]:
-        """List .ssdembed files in the project's embeddings/ directory.
+        """List .ssdembed files in the configured embeddings directory.
 
         Returns a list of dicts with keys: filename, vocab_size, embedding_dim,
-        l2_normalized, abtt_m, file_size.
+        l2_normalized, abtt, file_size.
         """
-        emb_dir = project.project_path / "embeddings"
+        from .paths import embeddings_dir
+        emb_dir = embeddings_dir()
         if not emb_dir.exists():
             return []
 
@@ -274,7 +355,7 @@ class ProjectIO:
                 meta["vocab_size"] = len(getattr(obj, "index_to_key", []))
                 meta["embedding_dim"] = getattr(obj, "vector_size", 0)
                 meta["l2_normalized"] = getattr(obj, "l2_normalized", False)
-                meta["abtt_m"] = getattr(obj, "abtt_m", 0)
+                meta["abtt"] = getattr(obj, "abtt", 0)
             except Exception:
                 # Fallback: read vectors.npy shape for vocab/dim
                 if sidecar.exists():
@@ -289,7 +370,7 @@ class ProjectIO:
                     meta["vocab_size"] = 0
                     meta["embedding_dim"] = 0
                 meta["l2_normalized"] = "l2" in path.name.lower()
-                meta["abtt_m"] = 0
+                meta["abtt"] = 0
             results.append(meta)
         return results
 
@@ -310,7 +391,8 @@ class ProjectIO:
 
         Returns the filename of the duplicate, or None.
         """
-        emb_dir = project.project_path / "embeddings"
+        from .paths import embeddings_dir
+        emb_dir = embeddings_dir()
         if not emb_dir.exists():
             return None
         for path in emb_dir.glob("*.ssdembed"):
@@ -318,44 +400,3 @@ class ProjectIO:
             if existing_hash == file_hash:
                 return path.name
         return None
-
-    # ------------------------------------------------------------------ #
-    #  Legacy helpers (kept for backward compat with old projects)
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def save_preprocessed_docs(
-        project: Project,
-        pre_docs: list,
-        docs: list,
-        id_row_indices: list = None,
-    ) -> None:
-        """Save preprocessed documents to cache (legacy format)."""
-        data_dir = project.project_path / "data"
-        data_dir.mkdir(exist_ok=True)
-
-        cache_file = data_dir / "preprocessed_docs.pkl"
-        payload = {"pre_docs": pre_docs, "docs": docs}
-        if id_row_indices is not None:
-            payload["id_row_indices"] = id_row_indices
-        with open(cache_file, "wb") as f:
-            pickle.dump(payload, f)
-
-    @staticmethod
-    def load_preprocessed_docs(project: Project) -> Optional[tuple]:
-        """Load preprocessed documents from cache (legacy format).
-
-        Returns (pre_docs, docs, id_row_indices) where id_row_indices may
-        be None for projects that were preprocessed without grouping.
-        """
-        cache_file = project.project_path / "data" / "preprocessed_docs.pkl"
-        if not cache_file.exists():
-            return None
-
-        with open(cache_file, "rb") as f:
-            data = pickle.load(f)
-        return (
-            data.get("pre_docs"),
-            data.get("docs"),
-            data.get("id_row_indices"),
-        )

@@ -225,14 +225,14 @@ class EmbeddingPrepareWorker(QThread):
         source_path: Path,
         output_dir: Path,
         l2_normalize: bool = True,
-        abtt_m: int = 0,
+        abtt: int = 0,
         parent=None,
     ):
         super().__init__(parent)
         self.source_path = source_path
         self.output_dir = output_dir
         self.l2_normalize = l2_normalize
-        self.abtt_m = abtt_m
+        self.abtt = abtt
         self._is_cancelled = False
 
     def cancel(self):
@@ -253,15 +253,15 @@ class EmbeddingPrepareWorker(QThread):
 
             # Check if source already has matching normalization
             source_l2 = emb.l2_normalized
-            source_abtt = emb.abtt_m
+            source_abtt = getattr(emb, "abtt", 0)
             needs_normalize = (
                 (self.l2_normalize and not source_l2) or
-                (self.abtt_m > source_abtt)
+                (self.abtt > source_abtt)
             )
 
             if needs_normalize:
                 self.progress.emit(55, "Normalizing embeddings...")
-                emb.normalize(l2=self.l2_normalize, abtt_m=self.abtt_m)
+                emb.normalize(l2=self.l2_normalize, abtt=self.abtt)
             else:
                 self.progress.emit(55, "Normalization already applied.")
 
@@ -278,7 +278,7 @@ class EmbeddingPrepareWorker(QThread):
             suffix_parts = []
             if emb.l2_normalized:
                 suffix_parts.append("l2")
-            abtt_val = emb.abtt_m
+            abtt_val = getattr(emb, "abtt", 0)
             if abtt_val > 0:
                 suffix_parts.append(f"abtt{abtt_val}")
             suffix = "_" + "_".join(suffix_parts) if suffix_parts else ""
@@ -309,7 +309,7 @@ class EmbeddingPrepareWorker(QThread):
                 "vocab_size": len(emb),
                 "embedding_dim": emb.vector_size,
                 "l2_normalized": emb.l2_normalized,
-                "abtt_m": emb.abtt_m,
+                "abtt": getattr(emb, "abtt", 0),
                 "file_size_mb": total_bytes / (1024 * 1024),
             }
 
@@ -360,7 +360,7 @@ class EmbeddingLoadWorker(QThread):
                 "vocab_size": len(emb),
                 "embedding_dim": emb.vector_size,
                 "l2_normalized": emb.l2_normalized,
-                "abtt_m": emb.abtt_m,
+                "abtt": getattr(emb, "abtt", 0),
             }
 
             if self.docs:

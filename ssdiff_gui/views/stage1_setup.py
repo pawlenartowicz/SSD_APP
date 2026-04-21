@@ -33,6 +33,7 @@ from ..models.project import Project
 from ..utils.worker_threads import PreprocessWorker, EmbeddingPrepareWorker, EmbeddingLoadWorker, SpacyDownloadWorker, find_local_model
 from ..utils.file_io import ProjectIO
 from ..utils.settings import app_settings
+from ..utils.paths import embeddings_dir, embeddings_autoload_enabled
 from .widgets.progress_dialog import ProgressDialog
 from .widgets.overlay_info_mixin import OverlayInfoMixin
 
@@ -229,6 +230,9 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
 
         # --- Language mode widgets (shown by default) ---
         self.language_row = QWidget()
+        self.language_row.setObjectName("language_row")
+        self.language_row.setAttribute(Qt.WA_StyledBackground, False)
+        self.language_row.setStyleSheet("QWidget#language_row { background: transparent; }")
         lang_layout = QHBoxLayout(self.language_row)
         lang_layout.setContentsMargins(20, 0, 0, 0)
 
@@ -267,6 +271,9 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
 
         # --- Custom model widgets (hidden by default) ---
         self.custom_row = QWidget()
+        self.custom_row.setObjectName("custom_row")
+        self.custom_row.setAttribute(Qt.WA_StyledBackground, False)
+        self.custom_row.setStyleSheet("QWidget#custom_row { background: transparent; }")
         custom_layout = QHBoxLayout(self.custom_row)
         custom_layout.setContentsMargins(20, 0, 0, 0)
 
@@ -502,10 +509,22 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
     # --- Helper methods ---
 
     def _on_language_changed(self, index: int):
-        """Update the auto-resolved model label when language changes."""
+        """Update the auto-resolved model label when language changes.
+
+        Also saves the chosen language to the project so the readiness check
+        can detect a mismatch with the language used to preprocess the corpus.
+        The corpus is preserved — switching back to the preprocessed language
+        flips the indicator green again without re-running preprocessing.
+        """
         lang = self.language_combo.currentData()
-        if lang:
-            self._update_auto_model_label(lang)
+        if not lang:
+            return
+        self._update_auto_model_label(lang)
+
+        if self.project is not None and self.project.language != lang:
+            self.project.language = lang
+            self.project.mark_dirty()
+            self._update_ready_indicator()
 
     def _browse_csv(self):
         """Open file dialog to select data file."""
@@ -828,6 +847,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
         self.project.stopword_mode = ["default", "none", "custom"][stop_idx]
         self.project.custom_stopwords = list(self._custom_stopwords) if stop_idx == 2 else []
         self.project.preprocessed_text_column = self.text_col_combo.currentText()
+        self.project.preprocessed_language = self.project.language
         self.project.n_docs_processed = stats["n_docs"]
         self.project.total_tokens = stats["total_tokens"]
         self.project.mean_words_before_stopwords = stats["mean_words_before_stopwords"]
@@ -938,7 +958,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
             with open(path, "rb") as f:
                 obj = pickle.load(f)
             is_l2 = getattr(obj, "l2_normalized", False)
-            cur_abtt = getattr(obj, "abtt_m", 0)
+            cur_abtt = getattr(obj, "abtt", 0)
             del obj
             if is_l2:
                 self.l2_check.setChecked(True)
@@ -962,7 +982,8 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
             return
         if not self.project:
             return
-        output_dir = self.project.project_path / "embeddings"
+        output_dir = embeddings_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
         l2 = self.l2_check.isChecked()
         abtt = self.abtt_spin.value()
         self.prepare_btn.setEnabled(False)
@@ -971,7 +992,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
             source_path=Path(source),
             output_dir=output_dir,
             l2_normalize=l2,
-            abtt_m=abtt,
+            abtt=abtt,
             parent=self,
         )
 
@@ -1042,7 +1063,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
             self.emb_table.setItem(i, 1, QTableWidgetItem(f"{meta['vocab_size']:,}"))
             self.emb_table.setItem(i, 2, QTableWidgetItem(str(meta["embedding_dim"])))
             self.emb_table.setItem(i, 3, QTableWidgetItem("Yes" if meta["l2_normalized"] else "No"))
-            self.emb_table.setItem(i, 4, QTableWidgetItem(str(meta["abtt_m"])))
+            self.emb_table.setItem(i, 4, QTableWidgetItem(str(meta["abtt"])))
             self.emb_table.setItem(i, 5, QTableWidgetItem(f"{meta['file_size_mb']:.1f}"))
             if meta["filename"] == selected:
                 self.emb_table.selectRow(i)
@@ -1073,7 +1094,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
                 return
         else:
             return
-        emb_path = self.project.project_path / "embeddings" / filename
+        emb_path = embeddings_dir() / filename
         if not emb_path.exists():
             QMessageBox.warning(self, "Error", f"File not found: {filename}")
             return
@@ -1136,7 +1157,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
         p.vocab_size = stats.get("vocab_size", 0)
         p.embedding_dim = stats.get("embedding_dim", 0)
         p.l2_normalized = stats.get("l2_normalized", False)
-        p.abtt_m = stats.get("abtt_m", 0)
+        p.abtt = stats.get("abtt", 0)
         p.emb_coverage_pct = stats.get("coverage_pct", 0.0)
         p.emb_n_oov = stats.get("n_oov", 0)
         cov = f", coverage: {p.emb_coverage_pct:.1f}%" if p.emb_coverage_pct > 0 else ""
@@ -1164,7 +1185,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
         )
         if reply != QMessageBox.Yes:
             return
-        emb_path = self.project.project_path / "embeddings" / filename
+        emb_path = embeddings_dir() / filename
         sidecar = Path(str(emb_path) + ".vectors.npy")
         import subprocess
         subprocess.run(["trash-put", str(emb_path)], check=False)
@@ -1220,7 +1241,14 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
                 detail = f"{n_docs:,} docs processed"
             checks.append(("Text Processing", True, detail))
         else:
-            checks.append(("Text Processing", False, "Not preprocessed"))
+            p = self.project
+            if (p._corpus is not None and p.preprocessed_language
+                    and p.language != p.preprocessed_language):
+                detail = (f"Language changed ('{p.preprocessed_language}' "
+                          f"-> '{p.language}') — re-preprocess needed")
+            else:
+                detail = "Not preprocessed"
+            checks.append(("Text Processing", False, detail))
 
         # 4. Embeddings
         if self.project._kv is not None:
@@ -1298,7 +1326,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
 
         # 4. Embedding file missing
         if project.selected_embedding:
-            emb_path = project.project_path / "embeddings" / project.selected_embedding
+            emb_path = embeddings_dir() / project.selected_embedding
             if not emb_path.exists():
                 project.selected_embedding = None
                 warnings.append(f"Embedding file not found: {project.selected_embedding}")
@@ -1335,7 +1363,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
         # while synchronous loading (CSV, preprocessed docs) runs.
         needs_embeddings = bool(
             project.selected_embedding
-            and (project.project_path / "embeddings" / project.selected_embedding).exists()
+            and (embeddings_dir() / project.selected_embedding).exists()
         )
         self._progress_dialog = ProgressDialog("Loading Project", self)
         self._progress_dialog.update_progress(0, "Loading dataset...")
@@ -1429,6 +1457,8 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
                 project._pre_docs = corpus.pre_docs
                 project._docs = corpus.docs
                 project._id_row_indices = None
+                if not project.preprocessed_language:
+                    project.preprocessed_language = project.language
 
         self._progress_dialog.update_progress(70, "Loading configuration...")
         QApplication.processEvents()
@@ -1436,7 +1466,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
         # Load embedding config — refresh table and restore status
         self._refresh_embeddings_table()
         self.l2_check.setChecked(project.l2_normalized)
-        self.abtt_spin.setValue(project.abtt_m)
+        self.abtt_spin.setValue(project.abtt)
 
         if project.selected_embedding:
             self.emb_status.setText(
@@ -1448,7 +1478,8 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
         self._update_ready_indicator()
 
         # Auto-load the previously selected embedding if available
-        if needs_embeddings and project._kv is None:
+        # (can be disabled via Settings → "Autoload embedding on project open")
+        if needs_embeddings and project._kv is None and embeddings_autoload_enabled():
             self._progress_dialog.update_progress(50, "Loading embeddings...")
             QApplication.processEvents()
             self._autoloading_embedding = True
@@ -1484,4 +1515,4 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
         # Embedding config is managed by the prepare/select workflow;
         # only persist the ABTT/L2 defaults from the "Prepare" panel.
         project.l2_normalized = self.l2_check.isChecked()
-        project.abtt_m = self.abtt_spin.value()
+        project.abtt = self.abtt_spin.value()

@@ -97,7 +97,7 @@ def tiny_embeddings():
 def synthetic_corpus(tokenized_docs):
     """ssdiff.Corpus from tokenized docs (pretokenized mode)."""
     from ssdiff import Corpus
-    return Corpus(tokenized_docs, pretokenized=True)
+    return Corpus(tokenized_docs, pretokenized=True, lang="en")
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +143,6 @@ class TestSaveArtifacts:
 
         ssd = SSD(tiny_embeddings, synthetic_corpus, y, lexicon, window=3)
         ssd_result = ssd.fit_pls(n_components=1, p_method=None)
-        ssd_result.lang = "en"  # needed by top_words / cluster_neighbors
 
         project = _make_project(tmp_path)
         ProjectIO.create_project_structure(project.project_path)
@@ -172,7 +171,6 @@ class TestSaveArtifacts:
 
         ssd = SSD(tiny_embeddings, synthetic_corpus, groups, lexicon, window=3)
         ssd_result = ssd.fit_groups(n_perm=100)
-        ssd_result.lang = "en"
 
         project = _make_project(tmp_path)
         ProjectIO.create_project_structure(project.project_path)
@@ -199,8 +197,7 @@ class TestSaveArtifacts:
         lexicon = ["happy", "sad", "angry", "love", "hate"]
 
         ssd = SSD(tiny_embeddings, synthetic_corpus, y, lexicon, window=3)
-        ssd_result = ssd.fit_ols(n_components=5)
-        ssd_result.lang = "en"
+        ssd_result = ssd.fit_ols(fixed_k=5)
 
         project = _make_project(tmp_path)
         ProjectIO.create_project_structure(project.project_path)
@@ -228,8 +225,7 @@ class TestSaveArtifacts:
         lexicon = ["happy", "sad", "angry", "love", "hate"]
 
         ssd = SSD(tiny_embeddings, synthetic_corpus, y, lexicon, window=3)
-        ssd_result = ssd.fit_ols(n_components=5)
-        ssd_result.lang = "en"
+        ssd_result = ssd.fit_ols(fixed_k=5)
 
         # First pickle the real result (sweep_result=None is fine)
         project = _make_project(tmp_path)
@@ -287,7 +283,7 @@ class TestSaveArtifacts:
         lexicon = ["happy", "sad", "angry", "love", "hate"]
 
         ssd = SSD(tiny_embeddings, synthetic_corpus, y, lexicon, window=3)
-        ssd_result = ssd.fit_ols(n_components=5)  # explicit K — no sweep
+        ssd_result = ssd.fit_ols(fixed_k=5)  # explicit K — no sweep
         assert ssd_result.sweep_result is None
 
         project = _make_project(tmp_path)
@@ -327,10 +323,12 @@ class TestPipelineRoundtrip:
         ProjectIO.save_result_config(result)
         ProjectIO.save_result(result)
 
+        from ssdiff import PLSResult
+
         loaded = ProjectIO.load_result(project.project_path, "20260414_pls")
         assert loaded.status == "complete"
         assert loaded._result is not None
-        assert loaded._result.result_type == "pls"
+        assert isinstance(loaded._result, PLSResult)
         assert loaded.config_snapshot["analysis_type"] == "pls"
         assert loaded.config_snapshot["pls_n_components"] == 1
 
@@ -343,7 +341,7 @@ class TestPipelineRoundtrip:
         lexicon = ["happy", "sad", "angry", "love", "hate"]
 
         ssd = SSD(tiny_embeddings, synthetic_corpus, y, lexicon, window=3)
-        ssd_result = ssd.fit_ols(n_components=10)
+        ssd_result = ssd.fit_ols(fixed_k=10)
 
         project = _make_project(tmp_path)
         ProjectIO.create_project_structure(project.project_path)
@@ -356,10 +354,12 @@ class TestPipelineRoundtrip:
         ProjectIO.save_result_config(result)
         ProjectIO.save_result(result)
 
+        from ssdiff import PCAOLSResult
+
         loaded = ProjectIO.load_result(project.project_path, "20260414_pcaols")
         assert loaded.status == "complete"
         assert loaded._result is not None
-        assert loaded._result.result_type == "pca_ols"
+        assert isinstance(loaded._result, PCAOLSResult)
         assert loaded.config_snapshot["analysis_type"] == "pca_ols"
 
     def test_groups_roundtrip(self, tmp_path, tiny_embeddings, synthetic_corpus):
@@ -384,10 +384,12 @@ class TestPipelineRoundtrip:
         ProjectIO.save_result_config(result)
         ProjectIO.save_result(result)
 
+        from ssdiff import GroupResult
+
         loaded = ProjectIO.load_result(project.project_path, "20260414_groups")
         assert loaded.status == "complete"
         assert loaded._result is not None
-        assert loaded._result.result_type == "group"
+        assert isinstance(loaded._result, GroupResult)
         assert loaded.config_snapshot["analysis_type"] == "groups"
 
     def test_replication_script_generated(self, tmp_path, tiny_embeddings, synthetic_corpus):

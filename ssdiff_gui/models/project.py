@@ -5,9 +5,16 @@ and Result (config snapshot + results reference).
 """
 
 from dataclasses import dataclass, field
+from inspect import signature
 from pathlib import Path
 from typing import Optional, List, Any, Tuple
 from datetime import datetime
+
+from ssdiff import SSD
+
+_PLS    = signature(SSD.fit_pls).parameters
+_PCAOLS = signature(SSD.fit_ols).parameters
+_GROUPS = signature(SSD.fit_groups).parameters
 
 DEFAULT_RANDOM_SEED = 2137
 
@@ -15,25 +22,31 @@ DEFAULT_RANDOM_SEED = 2137
 @dataclass
 class Result:
     """A single SSD analysis result with a flat config snapshot."""
-    result_id: str                   # YYYYMMDD_HHMMSS
+    result_id: str                   # YYYYMMDD_HHMMSS — stable unique id
     timestamp: datetime
-    result_path: Path
     config_snapshot: dict            # flat copy of all config at run time
+
+    # Set at save time (None for an unsaved, in-memory result).
+    result_path: Optional[Path] = None
+    folder_name: Optional[str] = None
 
     name: Optional[str] = None      # user-assigned name for archiving
     status: str = "pending"         # pending, running, complete, error, interrupted
     error_message: Optional[str] = None
 
-    # Runtime only (not serialized)
+    # Runtime only (not serialized) — reset every session
     _result: Optional[Any] = field(default=None, repr=False)   # ssdiff PLSResult/PCAOLSResult/GroupResult
+    is_orphan: bool = field(default=False, repr=False)         # on-disk but not in project.json tracked list
+    load_error: Optional[str] = field(default=None, repr=False)  # set when the folder exists but can't be loaded
 
     def to_dict(self) -> dict:
         """Serialize result metadata + config snapshot to JSON-friendly dict."""
         return {
             "result_id": self.result_id,
             "name": self.name,
+            "folder_name": self.folder_name,
             "timestamp": self.timestamp.isoformat(),
-            "result_path": str(self.result_path),
+            "result_path": str(self.result_path) if self.result_path else None,
             "config_snapshot": self.config_snapshot,
             "status": self.status,
             "error_message": self.error_message,
@@ -46,6 +59,7 @@ class Result:
             result_id=d.get("result_id") or d["run_id"],
             timestamp=datetime.fromisoformat(d["timestamp"]),
             result_path=result_path,
+            folder_name=d.get("folder_name"),
             config_snapshot=d.get("config_snapshot", {}),
             name=d.get("name"),
             status=d.get("status", "pending"),
@@ -120,26 +134,26 @@ class Result:
             if pca_pre is not None:
                 lines.append(f"    pca_preprocess={pca_pre},")
             lines.append(f"    p_method={p_method_str},")
-            lines.append(f"    n_perm={s.get('pls_n_perm', 1000)},")
-            lines.append(f"    n_splits={s.get('pls_n_splits', 50)},")
-            lines.append(f"    split_ratio={s.get('pls_split_ratio', 0.5)},")
+            lines.append(f"    n_perm={s.get('pls_n_perm', Project.__dataclass_fields__['pls_n_perm'].default)},")
+            lines.append(f"    n_splits={s.get('pls_n_splits', Project.__dataclass_fields__['pls_n_splits'].default)},")
+            lines.append(f"    split_ratio={s.get('pls_split_ratio', Project.__dataclass_fields__['pls_split_ratio'].default)},")
             lines.append(f"    random_state={rs_val},")
             lines.append(")")
         elif atype == "pca_ols":
             lines.append("result = ssd.fit_ols(")
             n_comp = s.get("pcaols_n_components")
-            lines.append(f"    n_components={n_comp},")
-            lines.append(f"    k_min={s.get('sweep_k_min', 20)},")
-            lines.append(f"    k_max={s.get('sweep_k_max', 120)},")
-            lines.append(f"    k_step={s.get('sweep_k_step', 2)},")
+            lines.append(f"    fixed_k={n_comp},")
+            lines.append(f"    k_min={s.get('sweep_k_min', Project.__dataclass_fields__['sweep_k_min'].default)},")
+            lines.append(f"    k_max={s.get('sweep_k_max', Project.__dataclass_fields__['sweep_k_max'].default)},")
+            lines.append(f"    k_step={s.get('sweep_k_step', Project.__dataclass_fields__['sweep_k_step'].default)},")
             lines.append(")")
         elif atype == "groups":
             rs = s.get("groups_random_state", "default")
             rs_val = DEFAULT_RANDOM_SEED if rs == "default" else int(rs)
             lines.append("result = ssd.fit_groups(")
             lines.append(f"    median_split={s.get('groups_median_split', False)},")
-            lines.append(f"    n_perm={s.get('groups_n_perm', 5000)},")
-            lines.append(f'    correction="{s.get("groups_correction", "holm")}",')
+            lines.append(f"    n_perm={s.get('groups_n_perm', Project.__dataclass_fields__['groups_n_perm'].default)},")
+            lines.append(f"    correction=\"{s.get('groups_correction', Project.__dataclass_fields__['groups_correction'].default)}\",")
             lines.append(f"    random_state={rs_val},")
             lines.append(")")
 
@@ -160,9 +174,10 @@ _SERIALIZED_FIELDS = [
     "name", "created_date", "modified_date",
     "csv_path", "csv_encoding", "text_column", "id_column", "n_rows", "n_valid",
     "language", "spacy_model", "input_mode", "stopword_mode", "custom_stopwords",
-    "preprocessed_text_column", "n_docs_processed", "total_tokens",
+    "preprocessed_text_column", "preprocessed_language",
+    "n_docs_processed", "total_tokens",
     "mean_words_before_stopwords",
-    "selected_embedding", "vocab_size", "embedding_dim", "l2_normalized", "abtt_m",
+    "selected_embedding", "vocab_size", "embedding_dim", "l2_normalized", "abtt",
     "emb_coverage_pct", "emb_n_oov",
     "analysis_type", "concept_mode", "outcome_column", "group_column", "lexicon_tokens",
     "min_hits_per_doc", "drop_no_hits", "fulldoc_stoplist",
@@ -181,11 +196,13 @@ _SERIALIZED_FIELDS = [
 _SNAPSHOT_COMMON = [
     "csv_path", "csv_encoding", "text_column", "id_column",
     "outcome_column", "group_column",
+    "n_rows", "n_valid",
+    "n_docs_processed", "total_tokens", "mean_words_before_stopwords",
     "language", "spacy_model", "input_mode", "stopword_mode",
     "analysis_type", "concept_mode", "lexicon_tokens",
     "min_hits_per_doc", "drop_no_hits", "fulldoc_stoplist",
     "context_window_size", "sif_a",
-    "selected_embedding", "l2_normalized", "abtt_m",
+    "selected_embedding", "l2_normalized", "abtt",
     "clustering_topn", "clustering_k_auto", "clustering_k_min",
     "clustering_k_max", "clustering_top_words",
 ]
@@ -226,6 +243,7 @@ class Project:
     stopword_mode: str = "default"        # "default", "none", "custom"
     custom_stopwords: List[str] = field(default_factory=list)
     preprocessed_text_column: Optional[str] = None
+    preprocessed_language: str = ""
     n_docs_processed: int = 0
     total_tokens: int = 0
     mean_words_before_stopwords: float = 0.0
@@ -235,7 +253,7 @@ class Project:
     vocab_size: int = 0
     embedding_dim: int = 0
     l2_normalized: bool = False
-    abtt_m: int = 0
+    abtt: int = 0
     emb_coverage_pct: float = 0.0
     emb_n_oov: int = 0
 
@@ -267,25 +285,25 @@ class Project:
     clustering_top_words: int = 10
 
     # -- Hyperparameters: PLS --
-    pls_n_components: int = 1
+    pls_n_components: int   = _PLS["n_components"].default
     pls_pca_preprocess: Optional[int] = None
-    pls_p_method: str = "auto"
-    pls_n_perm: int = 1000
-    pls_n_splits: int = 50
-    pls_split_ratio: float = 0.5
-    pls_random_state: str = "default"
+    pls_p_method:     str   = _PLS["p_method"].default
+    pls_n_perm:       int   = _PLS["n_perm"].default
+    pls_n_splits:     int   = _PLS["n_splits"].default
+    pls_split_ratio:  float = _PLS["split_ratio"].default
+    pls_random_state: str   = "default"
 
     # -- Hyperparameters: PCA+OLS --
     pcaols_n_components: Optional[int] = None
-    sweep_k_min: int = 20
-    sweep_k_max: int = 120
-    sweep_k_step: int = 2
+    sweep_k_min:  int = _PCAOLS["k_min"].default
+    sweep_k_max:  int = _PCAOLS["k_max"].default
+    sweep_k_step: int = _PCAOLS["k_step"].default
 
     # -- Hyperparameters: Groups --
-    groups_n_perm: int = 5000
-    groups_correction: str = "holm"
+    groups_n_perm:       int  = _GROUPS["n_perm"].default
+    groups_correction:   str  = _GROUPS["correction"].default
     groups_median_split: bool = False
-    groups_random_state: str = "default"
+    groups_random_state: str  = "default"
 
     # -- Results --
     results: List[Result] = field(default_factory=list)
@@ -325,9 +343,10 @@ class Project:
 
     @property
     def preprocessing_ready(self) -> bool:
-        """Corpus in RAM matches current text column."""
+        """Corpus in RAM matches the current text column AND chosen language."""
         return (self._corpus is not None
-                and self.preprocessed_text_column == self.text_column)
+                and self.preprocessed_text_column == self.text_column
+                and self.language == self.preprocessed_language)
 
     @property
     def embeddings_ready(self) -> bool:
@@ -567,7 +586,14 @@ class Project:
             elif isinstance(val, datetime):
                 val = val.isoformat()
             d[key] = val
-        d["results"] = [r.result_id for r in self.results]
+        # Only tracked results are persisted; orphans are discovered from
+        # the filesystem each session and don't enter project.json until
+        # the user explicitly opens/registers them.
+        d["results"] = [
+            (r.folder_name or r.result_id)
+            for r in self.results
+            if not r.is_orphan and (r.folder_name or r.result_id)
+        ]
         if self._id_row_indices is not None:
             d["id_row_indices"] = self._id_row_indices
         return d

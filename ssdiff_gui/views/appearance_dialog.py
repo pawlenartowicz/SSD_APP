@@ -21,6 +21,7 @@ from ..theme import (
     FONT_SIZE_OPTIONS,
     ThemePalette,
     generate_stylesheet,
+    build_qpalette,
     scale_font_sizes,
     get_saved_theme_name,
     get_saved_font_size,
@@ -275,6 +276,7 @@ class AppearanceDialog(QDialog):
 
         app = QApplication.instance()
         if app:
+            app.setPalette(build_qpalette(palette))
             app.setStyleSheet(generate_stylesheet(palette))
 
             # Update the app icon to match the new theme

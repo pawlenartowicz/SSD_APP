@@ -74,7 +74,7 @@ class TestReplicationScript:
         r = _make_result(tmp_path, config)
         script = r.to_replication_script()
         assert "fit_ols(" in script
-        assert "n_components=40" in script
+        assert "fixed_k=40" in script
         assert "k_min=20" in script
         assert "k_max=120" in script
         assert "k_step=2" in script

@@ -77,7 +77,7 @@ class TestProjectSerialization:
         p.vocab_size = 100000
         p.embedding_dim = 300
         p.l2_normalized = True
-        p.abtt_m = 1
+        p.abtt = 1
         p.emb_coverage_pct = 95.0
         p.emb_n_oov = 50
         p.analysis_type = "pca_ols"
@@ -129,7 +129,7 @@ class TestProjectSerialization:
         assert restored.vocab_size == 100000
         assert restored.embedding_dim == 300
         assert restored.l2_normalized is True
-        assert restored.abtt_m == 1
+        assert restored.abtt == 1
         assert restored.emb_coverage_pct == 95.0
         assert restored.emb_n_oov == 50
         assert restored.analysis_type == "pca_ols"
@@ -212,7 +212,7 @@ class TestProjectSerialization:
         assert restored.analysis_type == "pls"
         assert restored.pls_n_components == 1
         assert restored.groups_correction == "holm"
-        assert restored.sweep_k_min == 20
+        assert restored.sweep_k_min == Project.__dataclass_fields__["sweep_k_min"].default
 
 
 # ===================================================================
@@ -415,6 +415,7 @@ class TestComputedReadiness:
         p._corpus = "fake"
         p.text_column = "text"
         p.preprocessed_text_column = "text"
+        p.preprocessed_language = p.language
         assert p.preprocessing_ready is True
 
     def test_preprocessing_ready_column_mismatch(self, tmp_path):
@@ -439,6 +440,7 @@ class TestComputedReadiness:
         p.text_column = "text"
         p._corpus = "fake"
         p.preprocessed_text_column = "text"
+        p.preprocessed_language = p.language
         p._emb = "fake"
         assert p.stage1_ready is True
 

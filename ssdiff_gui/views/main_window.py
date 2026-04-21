@@ -244,6 +244,11 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self.open_project)
         file_menu.addAction(open_action)
 
+        self.import_result_action = QAction("&Import Results...", self)
+        self.import_result_action.triggered.connect(self.import_result)
+        self.import_result_action.setEnabled(False)
+        file_menu.addAction(self.import_result_action)
+
         file_menu.addSeparator()
 
         self.save_action = QAction("&Save Project", self)
@@ -523,6 +528,74 @@ class MainWindow(QMainWindow):
                 self, "Error", f"Failed to open project: {e}"
             )
 
+    def import_result(self):
+        """Import a result folder from anywhere on disk into the current project.
+
+        Mirrors open_project's upward-search: if the user picks a subdirectory
+        of a result folder, walk up parents until we find one that contains
+        both config.json and results.pkl. The loaded result lands in the
+        unsaved slot and only persists when the user clicks Save Result.
+        """
+        if not self.project:
+            return
+
+        picked = QFileDialog.getExistingDirectory(
+            self, "Select Result Folder", str(self.project.project_path)
+        )
+        if not picked:
+            return
+
+        result_path = None
+        candidate = Path(picked)
+        while True:
+            if (candidate / "config.json").exists() and (candidate / "results.pkl").exists():
+                result_path = candidate
+                break
+            if candidate == candidate.parent:
+                break
+            candidate = candidate.parent
+
+        if result_path is None:
+            QMessageBox.critical(
+                self,
+                "Invalid Result Folder",
+                f"No config.json + results.pkl found in or above:\n{picked}",
+            )
+            return
+
+        # Discard any current unsaved result (with confirmation)
+        if self.stage3_widget.has_unsaved_result():
+            reply = QMessageBox.warning(
+                self,
+                "Unsaved Result",
+                "You have an unsaved result.\n"
+                "Importing will discard it.\n\nContinue?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        try:
+            result = ProjectIO._load_result_folder(result_path)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Import Failed", f"Could not load result:\n{e}"
+            )
+            return
+
+        # Imported results go into the unsaved slot — no local folder yet.
+        result.result_path = None
+        result.folder_name = None
+        result.status = "complete"
+
+        self.stage3_action.setEnabled(True)
+        self.stage3_widget.load_project(self.project)
+        self.stage3_widget.show_unsaved_result(result)
+        self.go_to_stage(3)
+        self.status_bar.showMessage(
+            f"Imported result from {result_path} (unsaved)"
+        )
+
     def save_project(self):
         """Save the current project."""
         if not self.project:
@@ -549,6 +622,7 @@ class MainWindow(QMainWindow):
 
         # Enable menus
         self.save_action.setEnabled(True)
+        self.import_result_action.setEnabled(True)
         self.stage1_action.setEnabled(True)
         self.view_menu.menuAction().setVisible(True)
 
@@ -557,6 +631,7 @@ class MainWindow(QMainWindow):
             # User cancelled a required loading step — abort project open
             self.project = None
             self.save_action.setEnabled(False)
+            self.import_result_action.setEnabled(False)
             self.stage1_action.setEnabled(False)
             self._go_home()
             return

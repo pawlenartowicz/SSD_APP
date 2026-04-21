@@ -41,6 +41,11 @@ from .widgets.info_button import InfoButton
 from .widgets.overlay_info_mixin import OverlayInfoMixin
 
 
+def _project_default(name: str):
+    """Return the dataclass default for a Project field."""
+    return Project.__dataclass_fields__[name].default
+
+
 class Stage2Widget(OverlayInfoMixin, QWidget):
     """Stage 2: Run - Pre-flight review + lexicon builder."""
 
@@ -148,6 +153,14 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         self.analysis_type_group = QButtonGroup()
         self.analysis_type_group.setExclusive(True)
 
+        self.pcaols_btn = QPushButton("PCA+OLS")
+        self.pcaols_btn.setCheckable(True)
+        self.pcaols_btn.setObjectName("btn_model_select")
+        self.pcaols_btn.setMinimumHeight(36)
+        self.pcaols_btn.setCursor(Qt.PointingHandCursor)
+        self.analysis_type_group.addButton(self.pcaols_btn, 1)
+        btn_row.addWidget(self.pcaols_btn)
+
         self.pls_btn = QPushButton("PLS")
         self.pls_btn.setCheckable(True)
         self.pls_btn.setChecked(True)
@@ -156,14 +169,6 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         self.pls_btn.setCursor(Qt.PointingHandCursor)
         self.analysis_type_group.addButton(self.pls_btn, 0)
         btn_row.addWidget(self.pls_btn)
-
-        self.pcaols_btn = QPushButton("PCA+OLS")
-        self.pcaols_btn.setCheckable(True)
-        self.pcaols_btn.setObjectName("btn_model_select")
-        self.pcaols_btn.setMinimumHeight(36)
-        self.pcaols_btn.setCursor(Qt.PointingHandCursor)
-        self.analysis_type_group.addButton(self.pcaols_btn, 1)
-        btn_row.addWidget(self.pcaols_btn)
 
         self.groups_btn = QPushButton("Groups")
         self.groups_btn.setCheckable(True)
@@ -392,17 +397,17 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         sweep_range_row = QHBoxLayout()
         self.k_min_spin = QSpinBox()
         self.k_min_spin.setRange(2, 500)
-        self.k_min_spin.setValue(20)
+        self.k_min_spin.setValue(_project_default("sweep_k_min"))
         sweep_range_row.addWidget(self.k_min_spin)
         sweep_range_row.addWidget(QLabel("to"))
         self.k_max_spin = QSpinBox()
         self.k_max_spin.setRange(3, 1000)
-        self.k_max_spin.setValue(120)
+        self.k_max_spin.setValue(_project_default("sweep_k_max"))
         sweep_range_row.addWidget(self.k_max_spin)
         sweep_range_row.addWidget(QLabel("step"))
         self.k_step_spin = QSpinBox()
         self.k_step_spin.setRange(1, 50)
-        self.k_step_spin.setValue(2)
+        self.k_step_spin.setValue(_project_default("sweep_k_step"))
         sweep_range_row.addWidget(self.k_step_spin)
         sweep_range_row.addWidget(InfoButton(
             "Range and step size for the number of clusters (K)<br>"
@@ -432,7 +437,7 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
 
         self.groups_n_perm_spin = QSpinBox()
         self.groups_n_perm_spin.setRange(100, 100000)
-        self.groups_n_perm_spin.setValue(5000)
+        self.groups_n_perm_spin.setValue(_project_default("groups_n_perm"))
         self.groups_n_perm_spin.setSingleStep(500)
         _form_row(
             "Permutations:", self.groups_n_perm_spin,
@@ -1174,10 +1179,10 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
                 f'<tr><td style="{label_style}">L2 Normalized</td>'
                 f'<td style="{value_style}">{"Yes" if p.l2_normalized else "No"}</td></tr>'
             )
-            if p.abtt_m > 0:
+            if p.abtt > 0:
                 html.append(
                     f'<tr><td style="{label_style}">ABTT</td>'
-                    f'<td style="{value_style}">m={p.abtt_m}</td></tr>'
+                    f'<td style="{value_style}">m={p.abtt}</td></tr>'
                 )
         else:
             html.append(
@@ -1489,15 +1494,13 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
             return
 
         try:
-            # suggest_lexicon returns LexiconResult (iterable of dicts)
-            suggested = corpus.suggest_lexicon(
+            result = corpus.suggest_lexicon(
                 y_full, var_type=var_type,
             )
 
-            # Filter out tokens already in the lexicon
             suggested = [
-                row for row in suggested
-                if row["token"] not in self.lexicon
+                sug for sug in result.suggestions
+                if sug.token not in self.lexicon
             ][:50]
 
             if not suggested:
@@ -1519,21 +1522,21 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
             ])
 
         self.suggestions_table.setRowCount(len(suggested))
-        for i, row in enumerate(suggested):
+        for i, sug in enumerate(suggested):
             self.suggestions_table.setItem(
-                i, 0, QTableWidgetItem(row["token"])
+                i, 0, QTableWidgetItem(sug.token)
             )
             self.suggestions_table.setItem(
-                i, 1, QTableWidgetItem(str(row.get("freq", 0)))
+                i, 1, QTableWidgetItem(str(sug.freq))
             )
             self.suggestions_table.setItem(
-                i, 2, QTableWidgetItem(f"{row.get('corr', 0):.4f}")
+                i, 2, QTableWidgetItem(f"{sug.corr:.4f}")
             )
             self.suggestions_table.setItem(
-                i, 3, QTableWidgetItem(f"{row.get('pvalue', 1.0):.4g}")
+                i, 3, QTableWidgetItem(f"{sug.pvalue:.4g}")
             )
             self.suggestions_table.setItem(
-                i, 4, QTableWidgetItem(str(row.get("direction", "")))
+                i, 4, QTableWidgetItem(str(sug.direction))
             )
 
     # ------------------------------------------------------------------ #

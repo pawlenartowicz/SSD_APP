@@ -1,6 +1,7 @@
 """Stage 3: Results view for SSD."""
 
-from typing import Optional, List, Dict
+import re
+from typing import Optional, List, Dict, Tuple
 from pathlib import Path
 
 import pandas as pd
@@ -32,6 +33,8 @@ from PySide6.QtGui import QPixmap
 
 import numpy as np
 
+from ssdiff import PLSResult, PCAOLSResult, GroupResult
+
 from ..models.project import Project, Result
 from ..utils.settings import app_settings
 from .widgets.loading_overlay import LoadingOverlay
@@ -39,34 +42,101 @@ from .widgets.info_button import InfoButton
 from .widgets.removable_delegate import RemovableItemDelegate
 
 
-def _clusters_to_summary(clusters: list[dict], side: str) -> list[dict]:
-    """Transform ssdiff cluster_neighbors() output -> flat summary rows."""
+# Characters that are unsafe or platform-dependent in folder names.
+_INVALID_FOLDER_CHARS = re.compile(r'[/\\:*?"<>|\x00-\x1f]')
+
+
+def _sanitize_folder_name(name: str) -> str:
+    """Turn a user-provided name into a filesystem-safe folder basename.
+
+    Empty string means "no usable name" — caller should fall back to a timestamp.
+    """
+    name = name.strip()
+    if not name:
+        return ""
+    name = _INVALID_FOLDER_CHARS.sub("_", name)
+    name = re.sub(r"\s+", "_", name)
+    name = name.lstrip(".")           # no hidden/dotfile folders
+    name = name.rstrip(" .")          # Windows: trailing space/dot illegal
+    if len(name) > 100:
+        name = name[:100].rstrip("_")
+    return name
+
+
+def _resolve_folder_collision(results_dir: Path, base: str) -> str:
+    """Return `base`, or `base_2`, `base_3`… so the folder doesn't exist yet."""
+    if not (results_dir / base).exists():
+        return base
+    i = 2
+    while (results_dir / f"{base}_{i}").exists():
+        i += 1
+    return f"{base}_{i}"
+
+
+def _result_dropdown_label(result: Result) -> str:
+    """Human-readable label for the results dropdown.
+
+    Format: "<display_name> (YYYY-MM-DD HH:MM:SS)" + optional state tag.
+    """
+    display_name = result.name or result.result_id
+    timestamp = result.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+    label = f"{display_name} ({timestamp})"
+
+    if result.status == "missing" or result.result_path is None and not result._result:
+        # Unsaved in-memory results have result_path=None too — they go
+        # through a different branch in _populate_result_selector and
+        # never reach this function.
+        if result.status == "missing":
+            label += " [missing]"
+    elif result.load_error or result.status == "error":
+        label += " [broken]"
+    elif result.is_orphan:
+        label += " [orphan]"
+    return label
+
+
+def _clusters_to_summary(clusters_side, side: str) -> list[dict]:
+    """Transform a ClustersViewSided into flat summary rows."""
+    if not clusters_side:
+        return []
     rows = []
-    for rank, c in enumerate(clusters, 1):
-        top_words_str = ", ".join(w["word"] for w in c.get("words", [])[:5])
-        rows.append({
-            "cluster_rank": rank,
-            "side": side,
-            "size": c.get("size", 0),
-            "coherence": c.get("coherence", 0.0),
-            "centroid_cos_beta": c.get("centroid_cos_beta", 0.0),
-            "top_words": top_words_str,
-        })
+    try:
+        for rank, c in enumerate(clusters_side, 1):
+            top_words_str = ", ".join(
+                w.word for w in list(clusters_side.words(c.cluster_id))[:5]
+            )
+            rows.append({
+                "cluster_rank": rank,
+                "cluster_id": c.cluster_id,
+                "side": side,
+                "size": c.size,
+                "coherence": c.coherence,
+                "centroid_cos_beta": c.centroid_cos_beta,
+                "top_words": top_words_str,
+            })
+    except Exception:
+        return []
     return rows
 
 
-def _clusters_to_members(clusters: list[dict], side: str) -> list[dict]:
-    """Transform ssdiff cluster_neighbors() output -> flat member rows."""
+def _clusters_to_members(clusters_side, side: str) -> list[dict]:
+    """Transform a ClustersViewSided into flat member rows."""
+    if not clusters_side:
+        return []
     rows = []
-    for rank, c in enumerate(clusters, 1):
-        for w in c.get("words", []):
-            rows.append({
-                "cluster_rank": rank,
-                "side": side,
-                "word": w["word"],
-                "cos_centroid": w.get("cos_centroid", 0.0),
-                "cos_beta": w.get("cos_beta", 0.0),
-            })
+    try:
+        for rank, c in enumerate(clusters_side, 1):
+            for w in clusters_side.words(c.cluster_id):
+                rows.append({
+                    "cluster_rank": rank,
+                    "cluster_id": c.cluster_id,
+                    "side": side,
+                    "word": w.word,
+                    "cos_centroid": w.cos_centroid,
+                    "cos_beta": w.cos_beta,
+                })
+    except Exception:
+        return []
     return rows
 
 
@@ -82,7 +152,13 @@ class Stage3Widget(QWidget):
         self.current_result: Optional[Result] = None
         self._current_snippets: List[Dict] = []
         self._scores_df: Optional[pd.DataFrame] = None
-        self._current_contrast_key: Optional[str] = None
+        self._current_pair_key: Optional[Tuple[str, str]] = None
+
+        # Pair-selector widgets (one per pair-scoped tab — Cluster Overview,
+        # Contrast Snippets, Semantic Poles, Document Scores, Extreme Documents).
+        # All combos are kept in sync via _on_pair_changed.
+        self._pair_combos: List[QComboBox] = []
+        self._pair_frames: List[QWidget] = []
 
         # Unsaved-result tracking
         self._unsaved_result: Optional[Result] = None
@@ -144,19 +220,6 @@ class Stage3Widget(QWidget):
         header_layout.addWidget(self.result_selector)
 
         main_layout.addLayout(header_layout)
-
-        # Contrast selector row (for crossgroup with 3+ groups)
-        self._contrast_row = QWidget()
-        contrast_layout = QHBoxLayout(self._contrast_row)
-        contrast_layout.setContentsMargins(0, 0, 0, 0)
-        contrast_layout.addWidget(QLabel("Contrast:"))
-        self._contrast_combo = QComboBox()
-        self._contrast_combo.setMinimumWidth(250)
-        self._contrast_combo.currentIndexChanged.connect(self._on_contrast_selected)
-        contrast_layout.addWidget(self._contrast_combo)
-        contrast_layout.addStretch()
-        self._contrast_row.hide()
-        main_layout.addWidget(self._contrast_row)
 
         # Summary stats
         self._create_summary_section(main_layout)
@@ -329,6 +392,26 @@ class Stage3Widget(QWidget):
             card.name_label.setText(label)
             card.value_label.setText(value)
 
+    def _make_pair_selector(self) -> QWidget:
+        """Build one synchronized pair-selector (label + combo) for a pair-scoped tab.
+
+        Each call appends to self._pair_combos / self._pair_frames so all instances
+        can be populated and synced together. The returned frame is hidden when the
+        result isn't a multi-pair GroupResult.
+        """
+        frame = QWidget()
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel("Choose pair:"))
+        combo = QComboBox()
+        combo.setMinimumWidth(250)
+        combo.currentIndexChanged.connect(self._on_pair_changed)
+        layout.addWidget(combo)
+        frame.hide()
+        self._pair_combos.append(combo)
+        self._pair_frames.append(frame)
+        return frame
+
     # ------------------------------------------------------------------ #
     #  Tab 0 — Cluster Overview  (centrepiece)
     # ------------------------------------------------------------------ #
@@ -348,6 +431,7 @@ class Stage3Widget(QWidget):
 
         # Controls row
         ctrl = QHBoxLayout()
+        ctrl.addWidget(self._make_pair_selector())
         ctrl.addWidget(QLabel("Top words per cluster:"))
         self.cluster_topn_spin = QSpinBox()
         self.cluster_topn_spin.setRange(3, 30)
@@ -498,7 +582,17 @@ class Stage3Widget(QWidget):
     def _create_poles_tab(self) -> QWidget:
         """Create the semantic poles tab."""
         tab = QWidget()
-        layout = QHBoxLayout(tab)
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        ctrl = QHBoxLayout()
+        ctrl.addWidget(self._make_pair_selector())
+        ctrl.addStretch()
+        outer.addLayout(ctrl)
+
+        body = QWidget()
+        layout = QHBoxLayout(body)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         # Positive pole
         self._pos_pole_group = QGroupBox("Positive End (+\u03b2) \u2014 Higher Outcome")
@@ -532,6 +626,7 @@ class Stage3Widget(QWidget):
         self._neg_pole_group.setLayout(neg_layout)
         layout.addWidget(self._neg_pole_group)
 
+        outer.addWidget(body, stretch=1)
         return tab
 
     # ------------------------------------------------------------------ #
@@ -546,6 +641,7 @@ class Stage3Widget(QWidget):
 
         # Controls
         controls = QHBoxLayout()
+        controls.addWidget(self._make_pair_selector())
         controls.addWidget(QLabel("Side:"))
         self.snippet_side_combo = QComboBox()
         self.snippet_side_combo.addItems([
@@ -615,6 +711,7 @@ class Stage3Widget(QWidget):
         # Controls row
         controls = QHBoxLayout()
         controls.setContentsMargins(4, 4, 4, 0)
+        controls.addWidget(self._make_pair_selector())
         controls.addWidget(QLabel("Sort by:"))
         self.scores_sort_combo = QComboBox()
         self.scores_sort_combo.addItems([
@@ -671,6 +768,12 @@ class Stage3Widget(QWidget):
         tab = QWidget()
         outer = QVBoxLayout(tab)
         outer.setContentsMargins(0, 0, 0, 0)
+
+        ctrl = QHBoxLayout()
+        ctrl.setContentsMargins(4, 4, 4, 0)
+        ctrl.addWidget(self._make_pair_selector())
+        ctrl.addStretch()
+        outer.addLayout(ctrl)
 
         splitter = QSplitter(Qt.Vertical)
 
@@ -888,28 +991,36 @@ class Stage3Widget(QWidget):
     # ================================================================== #
 
     def _populate_result_selector(self):
-        """Populate the result selector dropdown (saved results + unsaved if present)."""
+        """Populate the result selector dropdown.
+
+        Order: unsaved (in-memory only) first, then tracked + orphan
+        entries from project.results in their stored order (tracked in
+        project.json order, then orphans newest-first — see load_project).
+        """
         self.result_selector.blockSignals(True)
         self.result_selector.clear()
 
-        # If there is an unsaved result, put it first
         if self._unsaved_result is not None:
-            self.result_selector.addItem("[Unsaved Result]", self._unsaved_result)
+            self.result_selector.addItem(
+                self._unsaved_label(self._unsaved_result), self._unsaved_result,
+            )
 
-        # Saved results, newest first
         if self.project and self.project.results:
             for result in reversed(self.project.results):
-                display_name = result.name or result.result_id
-                label = f"{display_name} ({result.result_id})"
-                if result.status == "error":
-                    label += " [ERROR]"
-                self.result_selector.addItem(label, result)
+                self.result_selector.addItem(_result_dropdown_label(result), result)
 
         self.result_selector.blockSignals(False)
 
         if self.result_selector.count() > 0:
             self.result_selector.setCurrentIndex(0)
             self._on_result_selected(0)
+
+    @staticmethod
+    def _unsaved_label(result: Result) -> str:
+        """Label for the in-memory unsaved slot (fresh run or imported)."""
+        if result.name:
+            return f"[Imported: {result.name}]"
+        return "[Unsaved Result]"
 
     def _on_result_selected(self, index: int):
         """Handle result selection change."""
@@ -919,14 +1030,54 @@ class Stage3Widget(QWidget):
         if result is None:
             return
 
-        # Determine if this is the unsaved result
+        # Unsaved in-memory slot (fresh run or just-imported result)
         if result is self._unsaved_result:
             self._is_viewing_unsaved = True
             self.run_name_input.show()
+            self.save_result_btn.setText("Save Result")
+            self.save_result_btn.setToolTip("")
+            self.save_result_btn.show()
+            self.show_result(result)
+            return
+
+        self._is_viewing_unsaved = False
+        self.run_name_input.hide()
+
+        # Missing folder — nothing to show; only the X button can act on it.
+        if result.status == "missing" or result.result_path is None:
+            self.save_result_btn.hide()
+            self.current_result = result
+            QMessageBox.warning(
+                self, "Result Missing",
+                "This result's folder is no longer on disk.\n\n"
+                "Use the X in the dropdown to remove it from the project.",
+            )
+            return
+
+        # Broken folder — can't render, but let the user delete it.
+        if result.load_error or (result.status == "error" and result._result is None):
+            self.save_result_btn.hide()
+            self.current_result = result
+            QMessageBox.warning(
+                self, "Result Could Not Be Loaded",
+                f"Failed to load this result's data:\n{result.load_error or 'unknown error'}",
+            )
+            return
+
+        # Orphan — promote to tracked on first open so Save Project persists it.
+        if result.is_orphan:
+            result.is_orphan = False
+            if self.project is not None:
+                self.project.mark_dirty()
+            self.result_selector.setItemText(index, _result_dropdown_label(result))
+
+        if result._result is not None:
+            self.save_result_btn.setText("Overwrite")
+            self.save_result_btn.setToolTip(
+                "Re-save this result in place (updates report / files)"
+            )
             self.save_result_btn.show()
         else:
-            self._is_viewing_unsaved = False
-            self.run_name_input.hide()
             self.save_result_btn.hide()
 
         self.show_result(result)
@@ -938,7 +1089,7 @@ class Stage3Widget(QWidget):
     def show_result(self, result: Result):
         """Display a specific result."""
         self.current_result = result
-        self._current_contrast_key = None
+        self._current_pair_key = None
 
         if not result._result:
             QMessageBox.warning(
@@ -956,16 +1107,19 @@ class Stage3Widget(QWidget):
         if getattr(ssd_result, "embeddings", None) is None and self.project._emb is not None:
             ssd_result.embeddings = self.project._emb
 
-        is_crossgroup = ssd_result.result_type == "group"
-        is_pca_ols = ssd_result.result_type == "pca_ols"
+        is_crossgroup = isinstance(ssd_result, GroupResult)
+        is_pca_ols = isinstance(ssd_result, PCAOLSResult)
 
-        # Analysis type badge
-        badge_map = {
-            "pls": ("PLS", "#6c9ce6"),
-            "pca_ols": ("PCA+OLS", "#4ec9a0"),
-            "group": ("Groups", "#e06c8a"),
-        }
-        badge_text, badge_color = badge_map.get(ssd_result.result_type, ("?", "#888"))
+        # Analysis type badge — theme-aware; pulls semantic colors from the current palette
+        p = self._html_palette()
+        if isinstance(ssd_result, PLSResult):
+            badge_text, fg_color, bg_color = "PLS", p.accent, p.accent_muted
+        elif isinstance(ssd_result, PCAOLSResult):
+            badge_text, fg_color, bg_color = "PCA+OLS", p.success, p.success_bg
+        elif isinstance(ssd_result, GroupResult):
+            badge_text, fg_color, bg_color = "Groups", p.warning, p.warning_bg
+        else:
+            badge_text, fg_color, bg_color = "?", p.text_secondary, p.bg_elevated
         self._analysis_badge.setText(badge_text)
         self._analysis_badge.setStyleSheet(
             f"QLabel {{"
@@ -973,35 +1127,49 @@ class Stage3Widget(QWidget):
             f"  border-radius: 4px;"
             f"  font-weight: 600;"
             f"  font-size: 11px;"
-            f"  background-color: {badge_color};"
-            f"  color: #ffffff;"
+            f"  background-color: {bg_color};"
+            f"  color: {fg_color};"
+            f"  border: 1px solid {fg_color};"
             f"}}"
         )
         self._analysis_badge.show()
 
         # Configure tabs for analysis type
         self.tabs.setTabVisible(2, is_pca_ols)  # PCA Sweep — only for PCA+OLS
-        self.tabs.setTabVisible(5, not is_crossgroup)  # Document Scores — not for groups
-        self.tabs.setTabVisible(6, not is_crossgroup)  # Extreme Docs — not for groups
+        self.tabs.setTabVisible(5, True)   # Document Scores
+        self.tabs.setTabVisible(6, True)   # Extreme Docs
         self.tabs.setTabVisible(7, not is_crossgroup)  # Misdiagnosed — not for groups
         self.tabs.setTabText(3, "Contrast Snippets" if is_crossgroup else "Beta Snippets")
 
-        # Configure contrast selector
-        if is_crossgroup and ssd_result.pairwise and len(ssd_result.pairwise) > 1:
-            contrast_labels = [ssd_result._contrast_label(pk) for pk in ssd_result.pairwise]
-            self._contrast_combo.blockSignals(True)
-            self._contrast_combo.clear()
-            for key in contrast_labels:
-                self._contrast_combo.addItem(key)
-            self._contrast_combo.blockSignals(False)
-            self._contrast_combo.setCurrentIndex(0)
-            self._current_contrast_key = contrast_labels[0]
-            self._contrast_row.show()
+        # Populate per-tab pair selectors (Cluster Overview, Contrast Snippets,
+        # Semantic Poles, Document Scores, Extreme Documents). All combos are
+        # kept in sync via _on_pair_changed.
+        if is_crossgroup and hasattr(ssd_result, "pairs") and ssd_result.pairs:
+            labels = ssd_result.group_labels or {}
+            items: List[Tuple[str, Tuple[str, str]]] = []
+            for pr in ssd_result.pairs:
+                key = (pr.g1, pr.g2)
+                lbl1 = labels.get(pr.g1, pr.g1)
+                lbl2 = labels.get(pr.g2, pr.g2)
+                if lbl1 != pr.g1 or lbl2 != pr.g2:
+                    text = f"{pr.g1} vs {pr.g2}  \u2014  {lbl1} vs {lbl2}"
+                else:
+                    text = f"{pr.g1} vs {pr.g2}"
+                items.append((text, key))
+            for combo in self._pair_combos:
+                combo.blockSignals(True)
+                combo.clear()
+                for text, key in items:
+                    combo.addItem(text, userData=key)
+                combo.setCurrentIndex(0)
+                combo.blockSignals(False)
+            self._current_pair_key = (ssd_result.pairs[0].g1, ssd_result.pairs[0].g2)
+            show_selectors = len(ssd_result.pairs) > 1
+            for frame in self._pair_frames:
+                frame.setVisible(show_selectors)
         else:
-            self._contrast_row.hide()
-            if is_crossgroup and ssd_result.pairwise:
-                contrast_labels = [ssd_result._contrast_label(pk) for pk in ssd_result.pairwise]
-                self._current_contrast_key = contrast_labels[0]
+            for frame in self._pair_frames:
+                frame.hide()
 
         # Update stats strip
         if is_crossgroup:
@@ -1034,9 +1202,9 @@ class Stage3Widget(QWidget):
         QApplication.processEvents()
         if is_pca_ols:
             self._load_pca_sweep_tab(result)
+        self._load_extreme_docs_tab(ssd_result)
+        QApplication.processEvents()
         if not is_crossgroup:
-            self._load_extreme_docs_tab(ssd_result)
-            QApplication.processEvents()
             self._load_misdiagnosed_tab(ssd_result)
             QApplication.processEvents()
 
@@ -1048,92 +1216,68 @@ class Stage3Widget(QWidget):
 
     def _show_continuous_stats(self, results):
         """Populate the stats strip for continuous analysis (PLS or PCA+OLS)."""
-        p_str = f"{results.pvalue:.2e}" if results.pvalue < 0.001 else f"{results.pvalue:.4f}"
+        p_str = f"{results.stats.pvalue:.2e}" if results.stats.pvalue < 0.001 else f"{results.stats.pvalue:.4f}"
 
-        if results.result_type == "pca_ols":
+        if isinstance(results, PCAOLSResult):
             # PCA+OLS: R² | Adj R² | p-value | β‖ | Docs | Selected K | Corr(y,ŷ)
-            self._set_stat_card(0, "R\u00b2", f"{results.r2:.4f}")
-            self._set_stat_card(1, "Adj. R\u00b2", f"{results.r2_adj:.4f}")
+            self._set_stat_card(0, "R\u00b2", f"{results.stats.r2:.4f}")
+            self._set_stat_card(1, "Adj. R\u00b2", f"{results.stats.r2_adj:.4f}")
             self._set_stat_card(2, "p-value", p_str)
-            self._set_stat_card(3, "\u2016\u03b2\u2016", f"{results.beta_norm:.4f}")
-            self._set_stat_card(4, "Documents Used", f"{results.n_kept:,}")
-            k_text = str(results.n_components) if results.n_components else "\u2014"
+            self._set_stat_card(3, "\u2016\u03b2\u2016", f"{results.stats.beta_norm:.4f}")
+            self._set_stat_card(4, "Documents Used", f"{results.stats.n_kept:,}")
+            k_text = str(results.pca_k) if results.pca_k else "\u2014"
             self._set_stat_card(5, "Selected K", k_text)
-            self._set_stat_card(6, "Corr(y, \u0177)", f"{results.y_corr_pred:.4f}")
+            self._set_stat_card(6, "Corr(y, \u0177)", f"{results.stats.y_corr_pred:.4f}")
         else:
             # PLS: R² | p-value | β‖ | Δy | Docs | IQR Effect | Corr(y,ŷ)
-            self._set_stat_card(0, "R\u00b2", f"{results.r2:.4f}")
+            self._set_stat_card(0, "R\u00b2", f"{results.stats.r2:.4f}")
             self._set_stat_card(1, "p-value", p_str)
-            self._set_stat_card(2, "\u2016\u03b2\u2016", f"{results.beta_norm:.4f}")
-            self._set_stat_card(3, "\u0394y / +0.10 cos", f"{results.delta:.4f}")
-            self._set_stat_card(4, "Documents Used", f"{results.n_kept:,}")
-            self._set_stat_card(5, "IQR Effect", f"{results.iqr_effect:.4f}")
-            self._set_stat_card(6, "Corr(y, \u0177)", f"{results.y_corr_pred:.4f}")
+            self._set_stat_card(2, "\u2016\u03b2\u2016", f"{results.stats.beta_norm:.4f}")
+            self._set_stat_card(3, "\u0394y / +0.10 cos", f"{results.stats.delta:.4f}")
+            self._set_stat_card(4, "Documents Used", f"{results.stats.n_kept:,}")
+            self._set_stat_card(5, "IQR Effect", f"{results.stats.iqr_effect:.4f}")
+            self._set_stat_card(6, "Corr(y, \u0177)", f"{results.stats.y_corr_pred:.4f}")
 
-    def _contrast_key_to_pair(self, result, label: str):
-        """Convert 'A vs B' label to the pairwise dict entry."""
-        if not label or not hasattr(result, 'pairwise') or not result.pairwise:
+    def _pair_for_key(self, result, pair_key):
+        """Return the Pair dataclass for a canonical pair tuple, or None."""
+        if not pair_key or not hasattr(result, "pairs") or not result.pairs:
             return None
-        for pair_key, data in result.pairwise.items():
-            if result._contrast_label(pair_key) == label:
-                return data
+        for p in result.pairs:
+            if (p.g1, p.g2) == tuple(pair_key):
+                return p
         return None
 
     def _show_crossgroup_stats(self, results):
         """Populate the stats strip for group comparison analysis."""
-        n_groups = len(results.group_labels) if results.group_labels else 0
+        cr = self._pair_for_key(results, self._current_pair_key)
+        is_multi = len(results.pairs) > 1
 
-        cr = self._contrast_key_to_pair(results, self._current_contrast_key)
+        def _fmt_p(v):
+            if v is None:
+                return "\u2014"
+            return f"{v:.2e}" if v < 0.001 else f"{v:.4f}"
 
-        # Parse group names from current contrast key
-        g1_name, g2_name = "Group A", "Group B"
-        if self._current_contrast_key:
-            parts = self._current_contrast_key.split(" vs ")
-            if len(parts) >= 2:
-                g1_name, g2_name = parts[0], parts[1]
+        if cr is None:
+            for i in range(7):
+                self._set_stat_card(i, "", "")
+            return
 
-        if n_groups > 2:
-            # 3+ groups: Omnibus p | p (corrected) | Cohen's d | ‖Contrast‖ | n docs | n(A) | n(B)
-            if results.omnibus_p is not None:
-                omnibus_p_str = f"{results.omnibus_p:.2e}" if results.omnibus_p < 0.001 else f"{results.omnibus_p:.4f}"
-            else:
-                omnibus_p_str = "\u2014"
-            self._set_stat_card(0, "Omnibus p", omnibus_p_str)
-
-            if cr:
-                p_str = f"{cr['p_corrected']:.2e}" if cr["p_corrected"] < 0.001 else f"{cr['p_corrected']:.4f}"
-                self._set_stat_card(1, "p (corrected)", p_str)
-                self._set_stat_card(2, "Cohen's d", f"{cr['cohens_d']:.3f}")
-                self._set_stat_card(3, "\u2016Contrast\u2016", f"{cr['contrast_norm']:.4f}")
-                self._set_stat_card(5, f"n ({g1_name})", f"{cr['n_g1']:,}")
-                self._set_stat_card(6, f"n ({g2_name})", f"{cr['n_g2']:,}")
-            else:
-                self._set_stat_card(1, "p (corrected)", "\u2014")
-                self._set_stat_card(2, "Cohen's d", "\u2014")
-                self._set_stat_card(3, "\u2016Contrast\u2016", "\u2014")
-                self._set_stat_card(5, f"n ({g1_name})", "\u2014")
-                self._set_stat_card(6, f"n ({g2_name})", "\u2014")
-
-            self._set_stat_card(4, "Documents Used", f"{results.n_kept:,}")
+        if is_multi:
+            self._set_stat_card(0, "Omnibus p", _fmt_p(results.test.omnibus_p))
+            self._set_stat_card(1, "p (corrected)", _fmt_p(cr.p_corrected))
+            self._set_stat_card(2, "Cohen's d", f"{cr.cohens_d:+.3f}")
+            self._set_stat_card(3, "\u2016Contrast\u2016", f"{cr.contrast_norm:.4f}")
+            self._set_stat_card(4, "Documents Used", f"{results.stats.n_kept:,}")
+            self._set_stat_card(5, "n (g1)", f"{cr.n_g1:,}")
+            self._set_stat_card(6, "n (g2)", f"{cr.n_g2:,}")
         else:
-            # 2 groups: p-value | Cohen's d | ‖Contrast‖ | Δ(cos) | n docs | n(A) | n(B)
-            if cr:
-                p_str = f"{cr['p_raw']:.2e}" if cr["p_raw"] < 0.001 else f"{cr['p_raw']:.4f}"
-                self._set_stat_card(0, "p-value", p_str)
-                self._set_stat_card(1, "Cohen's d", f"{cr['cohens_d']:.3f}")
-                self._set_stat_card(2, "\u2016Contrast\u2016", f"{cr['contrast_norm']:.4f}")
-                self._set_stat_card(3, "n Permutations", f"{results.n_perm:,}")
-                self._set_stat_card(5, f"n ({g1_name})", f"{cr['n_g1']:,}")
-                self._set_stat_card(6, f"n ({g2_name})", f"{cr['n_g2']:,}")
-            else:
-                self._set_stat_card(0, "p-value", "\u2014")
-                self._set_stat_card(1, "Cohen's d", "\u2014")
-                self._set_stat_card(2, "\u2016Contrast\u2016", "\u2014")
-                self._set_stat_card(3, "n Permutations", f"{results.n_perm:,}")
-                self._set_stat_card(5, f"n ({g1_name})", "\u2014")
-                self._set_stat_card(6, f"n ({g2_name})", "\u2014")
-
-            self._set_stat_card(4, "Documents Used", f"{results.n_kept:,}")
+            self._set_stat_card(0, "p-value", _fmt_p(cr.p_raw))
+            self._set_stat_card(1, "Cohen's d", f"{cr.cohens_d:+.3f}")
+            self._set_stat_card(2, "\u2016Contrast\u2016", f"{cr.contrast_norm:.4f}")
+            self._set_stat_card(3, "Permutations", f"{results.stats.n_perm:,}")
+            self._set_stat_card(4, "Documents Used", f"{results.stats.n_kept:,}")
+            self._set_stat_card(5, "n (g1)", f"{cr.n_g1:,}")
+            self._set_stat_card(6, "n (g2)", f"{cr.n_g2:,}")
 
     # ------------------------------------------------------------------ #
     #  Crossgroup UI helpers
@@ -1141,12 +1285,17 @@ class Stage3Widget(QWidget):
 
     def _update_crossgroup_labels(self):
         """Update UI labels for the current crossgroup contrast."""
-        if not self._current_contrast_key:
+        if not self._current_pair_key:
             return
 
-        parts = self._current_contrast_key.split(" vs ")
-        g1_name = parts[0] if len(parts) > 0 else "Group A"
-        g2_name = parts[1] if len(parts) > 1 else "Group B"
+        result = self.current_result._result if self.current_result else None
+        cr = self._pair_for_key(result, self._current_pair_key) if result else None
+        if cr is not None:
+            labels_map = result.group_labels or {}
+            g1_name = labels_map.get(cr.g1, cr.g1)
+            g2_name = labels_map.get(cr.g2, cr.g2)
+        else:
+            g1_name, g2_name = "Group A", "Group B"
 
         # Cluster overview groupboxes
         self._ov_pos_group.setTitle(f"Positive Direction  \u2192  {g1_name}")
@@ -1198,62 +1347,149 @@ class Stage3Widget(QWidget):
 
         For continuous analyses: data comes from the result directly.
         For groups: data is filtered to the active contrast.
+
+        Memoized on (result identity, contrast key); a change in either
+        automatically misses the cache, so no explicit invalidation is needed.
         """
         from types import SimpleNamespace
         result = self.current_result._result if self.current_result else None
         if result is None:
             return None
 
-        is_group = result.result_type == "group"
-        contrast = self._current_contrast_key if is_group else None
+        cache_key = (id(result), self._current_pair_key)
+        cached = getattr(self, "_display_cache", None)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+
+        is_group = isinstance(result, GroupResult)
+        target = None
+        if is_group and self._current_pair_key and len(result.pairs) > 1:
+            target = tuple(self._current_pair_key)
+
+        words_view = result.words
+        clusters_index = result.clusters
+        if target is not None:
+            try:
+                words_view = result.words[target]
+                clusters_index = result.clusters[target]
+            except (KeyError, TypeError):
+                pass
+
+        # Match the runner's params so we hit the same ssdiff cache entries;
+        # otherwise cluster_ids on clusters vs. snippets diverge.
+        p = self.project
+        cluster_kwargs = {}
+        snippet_kwargs = {"top_per_side": 200}
+        if p is not None:
+            k = None if p.clustering_k_auto else p.clustering_k_min
+            cluster_kwargs = {
+                "topn": p.clustering_topn,
+                "k": k,
+                "k_min": p.clustering_k_min,
+                "k_max": p.clustering_k_max,
+            }
+
+        def _sided(attr: str):
+            base = getattr(clusters_index, attr, None)
+            if base is None:
+                return None
+            if cluster_kwargs:
+                try:
+                    return base(**cluster_kwargs)
+                except Exception:
+                    pass
+            return base
+
+        pos_clusters_view = _sided("pos")
+        neg_clusters_view = _sided("neg")
+
+        try:
+            snippets_view = result.snippets(**snippet_kwargs)
+        except Exception:
+            snippets_view = result.snippets
+        if target is not None:
+            try:
+                snippets_view = result.snippets[target]
+            except (KeyError, TypeError):
+                pass
 
         # -- top words / poles --
-        all_tw = result.top_words() or []
-        if contrast:
-            all_tw = [w for w in all_tw if w.get("contrast") == contrast]
-        pos_neighbors = [w for w in all_tw if w["side"] == "pos"]
-        neg_neighbors = [w for w in all_tw if w["side"] == "neg"]
+        pos_neighbors = []
+        neg_neighbors = []
+        try:
+            for w in words_view:
+                if w.side == "pos":
+                    pos_neighbors.append({"side": "pos", "word": w.word, "cos_beta": w.cos_beta, "rank": w.rank})
+                elif w.side == "neg":
+                    neg_neighbors.append({"side": "neg", "word": w.word, "cos_beta": w.cos_beta, "rank": w.rank})
+        except Exception:
+            pass
 
-        # -- clusters --
-        pos_raw = result.cluster_neighbors("pos") or []
-        neg_raw = result.cluster_neighbors("neg") or []
-        if contrast:
-            pos_raw = [c for c in pos_raw if c.get("contrast") == contrast]
-            neg_raw = [c for c in neg_raw if c.get("contrast") == contrast]
         clusters_summary = (
-            _clusters_to_summary(pos_raw, "pos")
-            + _clusters_to_summary(neg_raw, "neg")
+            _clusters_to_summary(pos_clusters_view, "pos")
+            + _clusters_to_summary(neg_clusters_view, "neg")
         )
         clusters_members = (
-            _clusters_to_members(pos_raw, "pos")
-            + _clusters_to_members(neg_raw, "neg")
+            _clusters_to_members(pos_clusters_view, "pos")
+            + _clusters_to_members(neg_clusters_view, "neg")
         )
 
         # -- snippets --
-        snip = result.snippets() if result._cached_snippets is not None else None
-        if snip and contrast:
-            snippets_pos = [s for s in snip.get("pos", []) if s.get("contrast") == contrast]
-            snippets_neg = [s for s in snip.get("neg", []) if s.get("contrast") == contrast]
-        elif snip:
-            snippets_pos = snip.get("pos", [])
-            snippets_neg = snip.get("neg", [])
-        else:
-            snippets_pos = []
-            snippets_neg = []
+        snippets_pos = []
+        snippets_neg = []
+        try:
+            for s in snippets_view:
+                row = {
+                    "doc_id": s.doc_id,
+                    "post_id": getattr(s, "post_id", None),
+                    "snippet_id": getattr(s, "snippet_id", None),
+                    "side": s.side,
+                    "seed": getattr(s, "seed", None),
+                    "cosine": getattr(s, "cosine", None),
+                    "text_window": getattr(s, "text_window", ""),
+                    "text_surface": getattr(s, "text_surface", ""),
+                    "text_lemmas": getattr(s, "text_lemmas", ""),
+                    "cluster_id": getattr(s, "cluster_id", None),
+                }
+                if s.side == "pos":
+                    snippets_pos.append(row)
+                elif s.side == "neg":
+                    snippets_neg.append(row)
+        except Exception:
+            pass
 
-        # -- cluster snippets --
-        csnip = result.cluster_snippets() if result._cached_cluster_snippets is not None else None
-        if csnip and contrast:
-            cluster_snippets_pos = [s for s in csnip.get("pos", []) if s.get("contrast") == contrast]
-            cluster_snippets_neg = [s for s in csnip.get("neg", []) if s.get("contrast") == contrast]
-        elif csnip:
-            cluster_snippets_pos = csnip.get("pos", [])
-            cluster_snippets_neg = csnip.get("neg", [])
-        else:
-            cluster_snippets_pos = []
-            cluster_snippets_neg = []
+        # -- cluster snippets: centroid-based per-cluster extractor --
+        cluster_snippets_pos = []
+        cluster_snippets_neg = []
 
-        return SimpleNamespace(
+        def _snippets_view_to_rows(view):
+            rows = []
+            for s in view:
+                rows.append({
+                    "doc_id": s.doc_id,
+                    "post_id": getattr(s, "post_id", None),
+                    "snippet_id": getattr(s, "snippet_id", None),
+                    "side": s.side,
+                    "seed": getattr(s, "seed", None),
+                    "cosine": getattr(s, "cosine", None),
+                    "text_window": getattr(s, "text_window", ""),
+                    "text_surface": getattr(s, "text_surface", ""),
+                    "text_lemmas": getattr(s, "text_lemmas", ""),
+                    "cluster_id": getattr(s, "cluster_id", None),
+                })
+            return rows
+
+        def _cluster_rows(clusters_view):
+            if clusters_view is None or getattr(clusters_view, "_parent", None) is None:
+                return []
+            try:
+                return _snippets_view_to_rows(clusters_view.snippets(k=None))
+            except Exception:
+                return []
+        cluster_snippets_pos = _cluster_rows(pos_clusters_view)
+        cluster_snippets_neg = _cluster_rows(neg_clusters_view)
+
+        display = SimpleNamespace(
             pos_neighbors=pos_neighbors,
             neg_neighbors=neg_neighbors,
             clusters_summary=clusters_summary,
@@ -1263,36 +1499,40 @@ class Stage3Widget(QWidget):
             cluster_snippets_pos=cluster_snippets_pos,
             cluster_snippets_neg=cluster_snippets_neg,
         )
+        self._display_cache = (cache_key, display)
+        return display
 
-    def _on_contrast_selected(self, index: int):
-        """Handle contrast selection change in crossgroup mode."""
+    def _on_pair_changed(self, index: int):
+        """Handle pair selection change from any per-tab combo; sync all combos."""
         if index < 0 or not self.current_result or not self.current_result._result:
             return
-
         result = self.current_result._result
-        if not hasattr(result, 'pairwise') or not result.pairwise:
+        if not hasattr(result, "pairs") or not result.pairs:
             return
 
-        key = self._contrast_combo.currentText()
-        # Validate the key matches a known contrast
-        if not any(result._contrast_label(pk) == key for pk in result.pairwise):
+        sender = self.sender()
+        pair_key = sender.itemData(index) if sender is not None else None
+        if pair_key is None:
             return
+        known = {(p.g1, p.g2) for p in result.pairs}
+        if pair_key not in known:
+            return
+        self._current_pair_key = tuple(pair_key)
 
-        self._current_contrast_key = key
+        for combo in self._pair_combos:
+            if combo is sender:
+                continue
+            combo.blockSignals(True)
+            combo.setCurrentIndex(index)
+            combo.blockSignals(False)
 
-        # Update stats strip
         self._show_crossgroup_stats(result)
-
-        # Update group labels in UI
         self._update_crossgroup_labels()
 
-        # Resolve display data from the new contrast
-        display = self._get_display_data()
-
-        # Reload data tabs
         self._overlay_tabs.start()
         QApplication.processEvents()
 
+        display = self._get_display_data()
         self._load_cluster_overview(display)
         QApplication.processEvents()
         self._load_poles_tab(display)
@@ -1300,6 +1540,9 @@ class Stage3Widget(QWidget):
         self._load_snippets_tab()
         QApplication.processEvents()
         self._load_scores_tab(result)
+        QApplication.processEvents()
+        self._load_extreme_docs_tab(result)
+        QApplication.processEvents()
 
         self._overlay_tabs.stop()
 
@@ -1397,12 +1640,12 @@ class Stage3Widget(QWidget):
 
         cluster_info = clusters_for_side[row]
         cluster_rank = cluster_info.get("cluster_rank")
-        centroid_label = f"{side}_cluster_{cluster_rank}"
+        cluster_id = cluster_info.get("cluster_id")
 
         # Build member words string from members data
         members = [
             m for m in (display.clusters_members or [])
-            if m.get("cluster_rank") == cluster_rank and m.get("side") == side
+            if m.get("cluster_id") == cluster_id and m.get("side") == side
         ]
         member_words = [m.get("word", "") for m in members]
 
@@ -1416,7 +1659,7 @@ class Stage3Widget(QWidget):
         self._keywords_expanded = False
         self._update_keywords_display()
 
-        # Find matching snippets (filter from cluster-based snippets by centroid_label)
+        # Find matching snippets (filter from cluster-based snippets by cluster_id)
         snippets_pool = (
             display.cluster_snippets_pos if side == "pos"
             else display.cluster_snippets_neg
@@ -1424,7 +1667,7 @@ class Stage3Widget(QWidget):
 
         snippets = [
             s for s in snippets_pool
-            if s.get("centroid_label") == centroid_label
+            if s.get("cluster_id") == cluster_id
         ]
         self._ov_current_snippets = snippets
         self._fill_overview_snippet_table(snippets)
@@ -1476,24 +1719,35 @@ class Stage3Widget(QWidget):
 
     def _fill_overview_snippet_table(self, snippets: list):
         """Populate the overview snippet table."""
+        from ..utils.report_settings import get_report_setting, KEY_SNIPPET_PREVIEW
+        cap = get_report_setting(KEY_SNIPPET_PREVIEW)
+
         limit = min(len(snippets), self.cluster_snippets_spin.value())
-        self.ov_snippet_table.setUpdatesEnabled(False)
-        self.ov_snippet_table.setRowCount(limit)
-        for i in range(limit):
-            s = snippets[i]
-            self.ov_snippet_table.setItem(i, 0, QTableWidgetItem(str(s.get("seed", ""))))
-            self.ov_snippet_table.setItem(
-                i, 1, QTableWidgetItem(f"{s.get('cosine', 0):.4f}")
-            )
-            self.ov_snippet_table.setItem(
-                i, 2, QTableWidgetItem(str(s.get("profile_id", s.get("doc_id", ""))))
-            )
-            anchor = s.get("snippet_anchor", "")
-            if len(anchor) > 120:
-                anchor = anchor[:120] + "\u2026"
-            self.ov_snippet_table.setItem(i, 3, QTableWidgetItem(anchor))
-            QApplication.processEvents()
-        self.ov_snippet_table.setUpdatesEnabled(True)
+        table = self.ov_snippet_table
+        vheader = table.verticalHeader()
+
+        # See _display_snippets_tab: defer per-row height measurement by
+        # switching to Fixed during fill, restore ResizeToContents once at end.
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
+        vheader.setSectionResizeMode(QHeaderView.Fixed)
+        try:
+            table.setRowCount(limit)
+            for i in range(limit):
+                s = snippets[i]
+                table.setItem(i, 0, QTableWidgetItem(str(s.get("seed", ""))))
+                table.setItem(
+                    i, 1, QTableWidgetItem(f"{s.get('cosine', 0):.4f}")
+                )
+                table.setItem(i, 2, QTableWidgetItem(str(s.get("doc_id", ""))))
+                anchor = s.get("text_window", "")
+                if cap and len(anchor) > cap:
+                    anchor = anchor[:cap] + "\u2026"
+                table.setItem(i, 3, QTableWidgetItem(anchor))
+        finally:
+            vheader.setSectionResizeMode(QHeaderView.ResizeToContents)
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
 
     def _on_overview_snippet_selected(self):
         """Show full document text for the selected snippet."""
@@ -1555,28 +1809,36 @@ class Stage3Widget(QWidget):
 
     def _display_snippets_tab(self, snippets: list):
         """Display beta snippets in the snippets-tab table."""
-        limit = min(len(snippets), 500)
-        self.snippets_table.setUpdatesEnabled(False)
-        self.snippets_table.setRowCount(limit)
+        from ..utils.report_settings import get_report_setting, KEY_SNIPPET_PREVIEW
+        cap = get_report_setting(KEY_SNIPPET_PREVIEW)
 
-        for i in range(limit):
-            s = snippets[i]
-            self.snippets_table.setItem(
-                i, 0, QTableWidgetItem(str(s.get("seed", "")))
-            )
-            self.snippets_table.setItem(
-                i, 1, QTableWidgetItem(f"{s.get('cosine', 0):.4f}")
-            )
-            self.snippets_table.setItem(
-                i, 2,
-                QTableWidgetItem(str(s.get("profile_id", s.get("doc_id", "")))),
-            )
-            anchor = s.get("snippet_anchor", "")
-            if len(anchor) > 120:
-                anchor = anchor[:120] + "\u2026"
-            self.snippets_table.setItem(i, 3, QTableWidgetItem(anchor))
-            QApplication.processEvents()
-        self.snippets_table.setUpdatesEnabled(True)
+        limit = min(len(snippets), 500)
+        table = self.snippets_table
+        vheader = table.verticalHeader()
+
+        # ResizeToContents measures every row on each setItem — O(n²) with
+        # word-wrap. Switch to Fixed during fill, restore after so Qt measures
+        # once in a single batched pass.
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
+        vheader.setSectionResizeMode(QHeaderView.Fixed)
+        try:
+            table.setRowCount(limit)
+            for i in range(limit):
+                s = snippets[i]
+                table.setItem(i, 0, QTableWidgetItem(str(s.get("seed", ""))))
+                table.setItem(
+                    i, 1, QTableWidgetItem(f"{s.get('cosine', 0):.4f}")
+                )
+                table.setItem(i, 2, QTableWidgetItem(str(s.get("doc_id", ""))))
+                anchor = s.get("text_window", "")
+                if cap and len(anchor) > cap:
+                    anchor = anchor[:cap] + "\u2026"
+                table.setItem(i, 3, QTableWidgetItem(anchor))
+        finally:
+            vheader.setSectionResizeMode(QHeaderView.ResizeToContents)
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
 
         self.snippet_detail.clear()
         self._tab_displayed_snippets = snippets[:limit]
@@ -1614,7 +1876,7 @@ class Stage3Widget(QWidget):
     def _show_snippet_detail(self, snip: dict, text_edit: QTextEdit):
         """Render a snippet dict into a QTextEdit with rich HTML."""
         p = self._html_palette()
-        doc_id = snip.get("profile_id", snip.get("doc_id", "N/A"))
+        doc_id = snip.get("doc_id", "N/A")
 
         html = []
         html.append(
@@ -1640,8 +1902,8 @@ class Stage3Widget(QWidget):
             f'<span style="font-size: {p.font_size_lg}; font-weight: 600;">{snip.get("cosine", 0):.4f}</span>'
             f'</td>'
         )
-        cluster = snip.get("centroid_label")
-        if cluster:
+        cluster = snip.get("cluster_id")
+        if cluster is not None:
             html.append(
                 f'<td style="padding-right: 20px;">'
                 f'<span style="color: {p.text_secondary}; font-size: {p.font_size_sm};">CLUSTER</span><br/>'
@@ -1651,7 +1913,7 @@ class Stage3Widget(QWidget):
         html.append('</tr></table>')
 
         # Anchor snippet section
-        anchor = snip.get("snippet_anchor", "")
+        anchor = snip.get("text_window", "")
         if anchor:
             html.append(
                 f'<div style="border-top: 1px solid {p.border}; padding-top: 12px;">'
@@ -1661,7 +1923,7 @@ class Stage3Widget(QWidget):
             )
 
         # Full document text section
-        surface = snip.get("essay_text_surface", "")
+        surface = snip.get("text_surface", "")
         if surface:
             html.append(
                 f'<div style="border-top: 1px solid {p.border}; padding-top: 12px; margin-top: 12px;">'
@@ -1681,41 +1943,79 @@ class Stage3Widget(QWidget):
         self.scores_detail.clear()
         self.scores_detail_title.setText("Select a row to view its document text")
 
-        # Groups have no doc_scores — tab is hidden, but guard anyway
-        if results.result_type == "group":
-            self.scores_table.setRowCount(0)
-            self.scores_table.setColumnCount(0)
-            self._scores_df = None
+        if isinstance(results, GroupResult):
+            from ._pair_view import resolve_pair_data
+            try:
+                pair_view = resolve_pair_data(results, self._current_pair_key)
+            except Exception:
+                self.scores_table.setRowCount(0)
+                self.scores_table.setColumnCount(0)
+                self._scores_df = None
+                return
+
+            scores = pair_view.alignment_scores
+            groups = results.groups
+            labels_map = results.group_labels or {}
+            rows = []
+            for doc_id, (score, g) in enumerate(zip(scores, groups)):
+                rows.append({
+                    "idx": int(doc_id),
+                    "group": labels_map.get(g, g),
+                    "cos_align": float(score),
+                })
+            if not rows:
+                self.scores_table.setRowCount(0)
+                self.scores_table.setColumnCount(0)
+                self._scores_df = None
+                return
+
+            df = pd.DataFrame(rows)
+            self._scores_df = df
+            col_labels = {"idx": "Doc #", "group": "Group", "cos_align": "Cosine"}
+            display_cols = [col_labels.get(c, c) for c in df.columns]
+            self.scores_table.setColumnCount(len(df.columns))
+            self.scores_table.setHorizontalHeaderLabels(display_cols)
+            self._render_scores_df(df)
             return
 
         try:
-            scores = results.doc_scores()
+            n = results.stats.n_kept
+            pos = list(results.docs.pos(k=n))
+            neg = list(results.docs.neg(k=n))
+            rows = []
+            seen = set()
+            for d in pos + neg:
+                if d.doc_id in seen:
+                    continue
+                seen.add(d.doc_id)
+                rows.append({
+                    "idx": d.doc_id,
+                    "cos_align": d.alignment_score,
+                    "score_std": None,
+                    "yhat_raw": d.y_hat,
+                })
         except Exception:
             self.scores_table.setRowCount(0)
             self.scores_table.setColumnCount(0)
             self._scores_df = None
             return
 
-        if not scores:
+        if not rows:
             self.scores_table.setRowCount(0)
             self.scores_table.setColumnCount(0)
             self._scores_df = None
             return
 
-        df = pd.DataFrame(scores)
+        df = pd.DataFrame(rows)
         self._scores_df = df
 
-        # Friendly column names for continuous results
-        # Runner produces: {idx, cos_align, score_std, yhat_raw}
         col_labels = {
             "idx": "Doc #",
             "cos_align": "Cosine",
             "score_std": "Score (std)",
             "yhat_raw": "Predicted (raw)",
         }
-
         display_cols = [col_labels.get(c, c) for c in df.columns]
-
         self.scores_table.setColumnCount(len(df.columns))
         self.scores_table.setHorizontalHeaderLabels(display_cols)
         header = self.scores_table.horizontalHeader()
@@ -1854,45 +2154,81 @@ class Stage3Widget(QWidget):
 
     def _load_extreme_docs_tab(self, ssd_result):
         """Populate the extreme documents tab."""
-        from ..utils.report_settings import get_report_setting, KEY_EXTREME_DOCS
+        from ..utils.report_settings import (
+            get_report_setting, KEY_EXTREME_DOCS, KEY_SNIPPET_PREVIEW,
+        )
         k = get_report_setting(KEY_EXTREME_DOCS)
         if k == 0:
             self._extreme_high_table.setRowCount(0)
             self._extreme_low_table.setRowCount(0)
             return
 
+        if isinstance(ssd_result, GroupResult):
+            from ._pair_view import resolve_pair_data
+            try:
+                pair_view = resolve_pair_data(ssd_result, self._current_pair_key)
+            except Exception:
+                return
+            scores = pair_view.alignment_scores
+            groups = ssd_result.groups
+            labels_map = ssd_result.group_labels or {}
+            order_desc = np.argsort(-scores)
+            order_asc = np.argsort(scores)
+            pos_idx = order_desc[:k]
+            neg_idx = order_asc[:k]
+            cap = get_report_setting(KEY_SNIPPET_PREVIEW)
+            for table, idx_array in [(self._extreme_high_table, pos_idx),
+                                      (self._extreme_low_table, neg_idx)]:
+                headers = ["Rank", "Document Text", "Score", "Group"]
+                table.setColumnCount(len(headers))
+                table.setHorizontalHeaderLabels(headers)
+                table.setRowCount(len(idx_array))
+                for row_i, doc_id in enumerate(idx_array):
+                    text = self._get_document_text(int(doc_id)) or ""
+                    if cap and len(text) > cap:
+                        text = text[:cap] + "..."
+                    g = groups[doc_id]
+                    label = labels_map.get(g, g)
+                    g_display = f"{g} ({label})" if label != g else str(g)
+                    table.setItem(row_i, 0, QTableWidgetItem(str(row_i + 1)))
+                    table.setItem(row_i, 1, QTableWidgetItem(text))
+                    table.setItem(row_i, 2, QTableWidgetItem(f"{scores[doc_id]:.4f}"))
+                    table.setItem(row_i, 3, QTableWidgetItem(g_display))
+                table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+                table.resizeColumnsToContents()
+                table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+            return
+
         try:
-            docs = ssd_result.extreme_docs(k=k, by="predicted")
+            pos_docs = list(ssd_result.docs.pos(k=k))
+            neg_docs = list(ssd_result.docs.neg(k=k))
         except Exception:
             return
 
-
-        for table, side in [(self._extreme_high_table, "top"),
-                            (self._extreme_low_table, "bottom")]:
-            side_docs = [d for d in docs if d["side"] == side]
+        cap = get_report_setting(KEY_SNIPPET_PREVIEW)
+        for table, side_docs in [(self._extreme_high_table, pos_docs),
+                                  (self._extreme_low_table, neg_docs)]:
             headers = ["Rank", "Document Text", "Score", "Actual Y"]
             table.setColumnCount(len(headers))
             table.setHorizontalHeaderLabels(headers)
             table.setRowCount(len(side_docs))
-
-            for row_i, doc in enumerate(side_docs):
-                idx = doc["idx"]
-                text = self._get_document_text(idx) or ""
-                if len(text) > 200:
-                    text = text[:200] + "..."
-
+            for row_i, d in enumerate(side_docs):
+                text = self._get_document_text(d.doc_id) or ""
+                if cap and len(text) > cap:
+                    text = text[:cap] + "..."
                 table.setItem(row_i, 0, QTableWidgetItem(str(row_i + 1)))
                 table.setItem(row_i, 1, QTableWidgetItem(text))
-                table.setItem(row_i, 2, QTableWidgetItem(f"{doc['cos']:.4f}"))
-                table.setItem(row_i, 3, QTableWidgetItem(f"{doc['y_true']:.4f}"))
-
+                table.setItem(row_i, 2, QTableWidgetItem(f"{d.alignment_score:.4f}"))
+                table.setItem(row_i, 3, QTableWidgetItem(f"{d.y_true:.4f}"))
             table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
             table.resizeColumnsToContents()
             table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
 
     def _load_misdiagnosed_tab(self, ssd_result):
         """Populate the misdiagnosed documents tab."""
-        from ..utils.report_settings import get_report_setting, KEY_MISDIAGNOSED
+        from ..utils.report_settings import (
+            get_report_setting, KEY_MISDIAGNOSED, KEY_SNIPPET_PREVIEW,
+        )
         k = get_report_setting(KEY_MISDIAGNOSED)
         if k == 0:
             self._misdiag_over_table.setRowCount(0)
@@ -1900,29 +2236,27 @@ class Stage3Widget(QWidget):
             return
 
         try:
-            docs = ssd_result.misdiagnosed(k=k, side="both")
+            over_docs = list(ssd_result.docs.misdiagnosed(k=k, direction="over"))
+            under_docs = list(ssd_result.docs.misdiagnosed(k=k, direction="under"))
         except Exception:
             return
 
-        for table, side in [(self._misdiag_over_table, "over"),
-                            (self._misdiag_under_table, "under")]:
-            side_docs = [d for d in docs if d["side"] == side]
+        cap = get_report_setting(KEY_SNIPPET_PREVIEW)
+        for table, side_docs in [(self._misdiag_over_table, over_docs),
+                                  (self._misdiag_under_table, under_docs)]:
             headers = ["Rank", "Document Text", "Actual Y", "Predicted Y", "Residual"]
             table.setColumnCount(len(headers))
             table.setHorizontalHeaderLabels(headers)
             table.setRowCount(len(side_docs))
-
-            for row_i, doc in enumerate(side_docs):
-                idx = doc["idx"]
-                text = self._get_document_text(idx) or ""
-                if len(text) > 200:
-                    text = text[:200] + "..."
-
+            for row_i, d in enumerate(side_docs):
+                text = self._get_document_text(d.doc_id) or ""
+                if cap and len(text) > cap:
+                    text = text[:cap] + "..."
                 table.setItem(row_i, 0, QTableWidgetItem(str(row_i + 1)))
                 table.setItem(row_i, 1, QTableWidgetItem(text))
-                table.setItem(row_i, 2, QTableWidgetItem(f"{doc['y_true']:.4f}"))
-                table.setItem(row_i, 3, QTableWidgetItem(f"{doc['yhat']:.4f}"))
-                table.setItem(row_i, 4, QTableWidgetItem(f"{doc['residual']:.4f}"))
+                table.setItem(row_i, 2, QTableWidgetItem(f"{d.y_true:.4f}"))
+                table.setItem(row_i, 3, QTableWidgetItem(f"{d.y_hat:.4f}"))
+                table.setItem(row_i, 4, QTableWidgetItem(f"{d.residual:.4f}"))
 
             table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
             table.resizeColumnsToContents()
@@ -1965,31 +2299,102 @@ class Stage3Widget(QWidget):
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _build_pairwise_html(pairwise_table, section_style, label_style, p):
-        """Build HTML for the pairwise comparison results table."""
+    def _build_group_detail_html(gr, section_style: str, label_style: str, value_style: str, p) -> list:
+        """Build HTML fragments for the GroupResult-specific Details sections.
+
+        Covers: Omnibus, Group Sizes (from ``gr.groups`` + ``gr.group_labels``),
+        and the per-pair table (from ``gr.pairs``). Returns a list of HTML
+        strings ready to be joined and fed into a QTextEdit.
+        """
+        html = []
+        n_groups = len(gr.group_labels) if gr.group_labels else gr.G
+        test_label = "Omnibus Permutation Test" if n_groups > 2 else "Pairwise Permutation Test"
+        html.append(f'<div style="{section_style}">{test_label}</div>')
+        html.append('<table cellspacing="6" style="width: 100%;">')
+        if gr.test.omnibus_T is not None:
+            html.append(
+                f'<tr><td style="{label_style}">Test Statistic (T)</td>'
+                f'<td style="{value_style}">{gr.test.omnibus_T:.4f}</td></tr>'
+            )
+        if gr.test.omnibus_p is not None:
+            p_str = f"{gr.test.omnibus_p:.2e}" if gr.test.omnibus_p < 0.001 else f"{gr.test.omnibus_p:.4f}"
+            html.append(
+                f'<tr><td style="{label_style}">p-value</td>'
+                f'<td style="{value_style}">{p_str}</td></tr>'
+            )
+        html.append(
+            f'<tr><td style="{label_style}">Permutations</td>'
+            f'<td style="{value_style}">{gr.n_perm:,}</td></tr>'
+        )
+        html.append(
+            f'<tr><td style="{label_style}">Correction</td>'
+            f'<td style="{value_style}">{gr.correction}</td></tr>'
+        )
+        html.append(
+            f'<tr><td style="{label_style}">Random State</td>'
+            f'<td style="{value_style}">{gr.random_state}</td></tr>'
+        )
+        html.append(
+            f'<tr><td style="{label_style}">Groups</td>'
+            f'<td style="{value_style}">{n_groups}</td></tr>'
+        )
+        html.append(
+            f'<tr><td style="{label_style}">Documents Used</td>'
+            f'<td style="{value_style}">{gr.n_kept:,}</td></tr>'
+        )
+        html.append("</table>")
+
+        groups = getattr(gr, "groups", None)
+        if groups is not None:
+            unique, counts = np.unique(groups, return_counts=True)
+            labels_map = gr.group_labels or {}
+            html.append(f'<div style="{section_style}">Group Sizes</div>')
+            html.append('<table cellspacing="6" style="width: 100%;">')
+            for g, cnt in zip(unique, counts):
+                display = labels_map.get(g, g)
+                html.append(
+                    f'<tr><td style="{label_style}">{g}</td>'
+                    f'<td style="{value_style}">{display}</td>'
+                    f'<td style="{value_style}">{cnt:,}</td></tr>'
+                )
+            html.append("</table>")
+
+        return html
+
+    @staticmethod
+    def _build_pairwise_html(gr, section_style: str, label_style: str, p) -> list:
+        """Build HTML for the pairwise comparison results table.
+
+        ``gr`` is a GroupResult. Iterates ``gr.pairs`` directly — no intermediate
+        dict layer.
+        """
+        labels_map = gr.group_labels or {}
         html = []
         html.append(f'<div style="{section_style}">Pairwise Comparison Results</div>')
         html.append(
             '<table cellspacing="4" style="width: 100%; font-size: 12px;">'
             f'<tr style="{label_style}">'
             "<td>Group A</td><td>Group B</td><td>n_A</td><td>n_B</td>"
-            "<td>Cos Dist</td><td>p</td><td>p (corr)</td><td>Cohen's d</td></tr>"
+            "<td>Contrast norm</td><td>p</td><td>p (corr)</td><td>Cohen's d</td></tr>"
         )
-        for pw in pairwise_table:
-            p_raw = pw.get("p_raw", 0)
-            p_corr = pw.get("p_corrected", 0)
-            p_raw_str = f"{p_raw:.2e}" if p_raw < 0.001 else f"{p_raw:.4f}"
-            p_corr_str = f"{p_corr:.2e}" if p_corr < 0.001 else f"{p_corr:.4f}"
+        for pr in gr.pairs:
+            p_raw_str = f"{pr.p_raw:.2e}" if pr.p_raw < 0.001 else f"{pr.p_raw:.4f}"
+            p_corr_str = (
+                f"{pr.p_corrected:.2e}" if pr.p_corrected < 0.001
+                else f"{pr.p_corrected:.4f}"
+            )
+            g1_label = labels_map.get(pr.g1, pr.g1)
+            g2_label = labels_map.get(pr.g2, pr.g2)
             html.append(
                 f'<tr>'
-                f'<td>{pw.get("group_A", "")}</td>'
-                f'<td>{pw.get("group_B", "")}</td>'
-                f'<td>{pw.get("n_A", 0):,}</td>'
-                f'<td>{pw.get("n_B", 0):,}</td>'
-                f'<td>{pw.get("cosine_distance", 0):.4f}</td>'
+                f'<td>{g1_label} ({pr.g1})</td>'
+                f'<td>{g2_label} ({pr.g2})</td>'
+                f'<td>{pr.n_g1:,}</td>'
+                f'<td>{pr.n_g2:,}</td>'
+                f'<td>{pr.contrast_norm:.4f}</td>'
                 f'<td>{p_raw_str}</td>'
                 f'<td>{p_corr_str}</td>'
-                f'<td>{pw.get("cohens_d", 0):.3f}</td>'
+                f'<td>{pr.cohens_d:.3f}</td>'
                 f'</tr>'
             )
         html.append("</table>")
@@ -2006,7 +2411,7 @@ class Stage3Widget(QWidget):
             f"border-bottom: 1px solid {p.border}; padding-bottom: 4px; margin: 12px 0 8px 0;"
         )
 
-        is_crossgroup = result._result and result._result.result_type == "group"
+        is_crossgroup = result._result and isinstance(result._result, GroupResult)
         is_fulldoc = result.config_snapshot.get("concept_mode", "lexicon") == "fulldoc"
 
         # --- Result Information ---
@@ -2025,10 +2430,17 @@ class Stage3Widget(QWidget):
             f'<tr><td style="{label_style}">Status</td>'
             f'<td style="{value_style}">{result.status}</td></tr>'
         )
-        atype_display = {"pls": "PLS", "pca_ols": "PCA+OLS", "group": "Group Comparison"}
+        if isinstance(result._result, PLSResult):
+            atype_label = "PLS"
+        elif isinstance(result._result, PCAOLSResult):
+            atype_label = "PCA+OLS"
+        elif isinstance(result._result, GroupResult):
+            atype_label = "Group Comparison"
+        else:
+            atype_label = type(result._result).__name__
         run_html.append(
             f'<tr><td style="{label_style}">Analysis Type</td>'
-            f'<td style="{value_style}">{atype_display.get(result._result.result_type, result._result.result_type)}</td></tr>'
+            f'<td style="{value_style}">{atype_label}</td></tr>'
         )
         run_html.append(
             f'<tr><td style="{label_style}">Mode</td>'
@@ -2098,69 +2510,11 @@ class Stage3Widget(QWidget):
             res = result._result
 
             if is_crossgroup:
-                # Crossgroup: Permutation Test section
-                n_groups = len(res.group_labels) if res.group_labels else 0
-                test_label = "Omnibus Permutation Test" if n_groups > 2 else "Pairwise Permutation Test"
-                run_html.append(f'<div style="{section_style}">{test_label}</div>')
-                run_html.append('<table cellspacing="6" style="width: 100%;">')
-
-                if res.omnibus_T is not None:
-                    run_html.append(
-                        f'<tr><td style="{label_style}">Test Statistic (T)</td>'
-                        f'<td style="{value_style}">{res.omnibus_T:.4f}</td></tr>'
+                run_html.extend(
+                    self._build_group_detail_html(
+                        res, section_style, label_style, value_style, p
                     )
-                if res.omnibus_p is not None:
-                    p_str = f"{res.omnibus_p:.2e}" if res.omnibus_p < 0.001 else f"{res.omnibus_p:.4f}"
-                    run_html.append(
-                        f'<tr><td style="{label_style}">p-value</td>'
-                        f'<td style="{value_style}">{p_str}</td></tr>'
-                    )
-                if res.n_perm is not None:
-                    run_html.append(
-                        f'<tr><td style="{label_style}">Permutations</td>'
-                        f'<td style="{value_style}">{res.n_perm:,}</td></tr>'
-                    )
-                run_html.append(
-                    f'<tr><td style="{label_style}">Groups</td>'
-                    f'<td style="{value_style}">{n_groups}</td></tr>'
                 )
-                run_html.append(
-                    f'<tr><td style="{label_style}">Documents Used</td>'
-                    f'<td style="{value_style}">{res.n_kept:,}</td></tr>'
-                )
-                run_html.append("</table>")
-
-                # Group counts
-                if hasattr(res, 'groups_kept') and res.groups_kept is not None:
-                    unique, counts = np.unique(res.groups_kept, return_counts=True)
-                    group_counts = dict(zip(unique, counts))
-                    run_html.append(f'<div style="{section_style}">Group Sizes</div>')
-                    run_html.append('<table cellspacing="6" style="width: 100%;">')
-                    for g, cnt in sorted(group_counts.items()):
-                        run_html.append(
-                            f'<tr><td style="{label_style}">{g}</td>'
-                            f'<td style="{value_style}">{cnt:,}</td></tr>'
-                        )
-                    run_html.append("</table>")
-
-                # Data Retention
-                run_html.append(f'<div style="{section_style}">Data Retention</div>')
-                run_html.append('<table cellspacing="6" style="width: 100%;">')
-                run_html.append(
-                    f'<tr><td style="{label_style}">Input documents</td>'
-                    f'<td style="{value_style}">{res.n_raw:,}</td></tr>'
-                )
-                run_html.append(
-                    f'<tr><td style="{label_style}">Kept</td>'
-                    f'<td style="{value_style}">{res.n_kept:,}</td></tr>'
-                )
-                if res.n_raw:
-                    drop_pct = res.n_dropped / res.n_raw * 100
-                    run_html.append(
-                        f'<tr><td style="{label_style}">Dropped</td>'
-                        f'<td style="{value_style}">{res.n_dropped:,} ({drop_pct:.1f}%)</td></tr>'
-                    )
-                run_html.append("</table>")
 
             else:
                 # Continuous: Model Fit
@@ -2168,21 +2522,21 @@ class Stage3Widget(QWidget):
                 run_html.append('<table cellspacing="6" style="width: 100%;">')
                 run_html.append(
                     f'<tr><td style="{label_style}">R\u00b2</td>'
-                    f'<td style="{value_style}">{res.r2:.4f}</td></tr>'
+                    f'<td style="{value_style}">{res.stats.r2:.4f}</td></tr>'
                 )
-                if res.result_type == "pca_ols":
+                if isinstance(res, PCAOLSResult):
                     run_html.append(
                         f'<tr><td style="{label_style}">Adjusted R\u00b2</td>'
-                        f'<td style="{value_style}">{res.r2_adj:.4f}</td></tr>'
+                        f'<td style="{value_style}">{res.stats.r2_adj:.4f}</td></tr>'
                     )
-                pval_str = f"{res.pvalue:.2e}" if res.pvalue < 0.001 else f"{res.pvalue:.4f}"
+                pval_str = f"{res.stats.pvalue:.2e}" if res.stats.pvalue < 0.001 else f"{res.stats.pvalue:.4f}"
                 run_html.append(
                     f'<tr><td style="{label_style}">p-value</td>'
                     f'<td style="{value_style}">{pval_str}</td></tr>'
                 )
                 run_html.append(
                     f'<tr><td style="{label_style}">Corr(y, \u0177)</td>'
-                    f'<td style="{value_style}">{res.y_corr_pred:.4f}</td></tr>'
+                    f'<td style="{value_style}">{res.stats.y_corr_pred:.4f}</td></tr>'
                 )
                 run_html.append("</table>")
 
@@ -2191,15 +2545,15 @@ class Stage3Widget(QWidget):
                 run_html.append('<table cellspacing="6" style="width: 100%;">')
                 run_html.append(
                     f'<tr><td style="{label_style}">\u2016\u03b2\u2016 (SD(y) / cosine)</td>'
-                    f'<td style="{value_style}">{res.beta_norm:.4f}</td></tr>'
+                    f'<td style="{value_style}">{res.stats.beta_norm:.4f}</td></tr>'
                 )
                 run_html.append(
                     f'<tr><td style="{label_style}">\u0394y per +0.10 cosine</td>'
-                    f'<td style="{value_style}">{res.delta:.4f}</td></tr>'
+                    f'<td style="{value_style}">{res.stats.delta:.4f}</td></tr>'
                 )
                 run_html.append(
                     f'<tr><td style="{label_style}">IQR(cos) effect</td>'
-                    f'<td style="{value_style}">{res.iqr_effect:.4f}</td></tr>'
+                    f'<td style="{value_style}">{res.stats.iqr_effect:.4f}</td></tr>'
                 )
                 run_html.append("</table>")
 
@@ -2208,22 +2562,22 @@ class Stage3Widget(QWidget):
                 run_html.append('<table cellspacing="6" style="width: 100%;">')
                 run_html.append(
                     f'<tr><td style="{label_style}">Input documents</td>'
-                    f'<td style="{value_style}">{res.n_raw:,}</td></tr>'
+                    f'<td style="{value_style}">{res.stats.n_raw:,}</td></tr>'
                 )
                 run_html.append(
                     f'<tr><td style="{label_style}">Kept</td>'
-                    f'<td style="{value_style}">{res.n_kept:,}</td></tr>'
+                    f'<td style="{value_style}">{res.stats.n_kept:,}</td></tr>'
                 )
-                if res.n_raw:
-                    drop_pct = res.n_dropped / res.n_raw * 100
+                if res.stats.n_raw:
+                    drop_pct = res.stats.n_dropped / res.stats.n_raw * 100
                     run_html.append(
                         f'<tr><td style="{label_style}">Dropped</td>'
-                        f'<td style="{value_style}">{res.n_dropped:,} ({drop_pct:.1f}%)</td></tr>'
+                        f'<td style="{value_style}">{res.stats.n_dropped:,} ({drop_pct:.1f}%)</td></tr>'
                     )
                 run_html.append("</table>")
 
                 # PCA+OLS specific: components
-                if res.result_type == "pca_ols":
+                if isinstance(res, PCAOLSResult):
                     run_html.append(f'<div style="{section_style}">PCA</div>')
                     run_html.append('<table cellspacing="6" style="width: 100%;">')
                     run_html.append(
@@ -2231,25 +2585,25 @@ class Stage3Widget(QWidget):
                         f'<td style="{value_style}">{res.n_components}</td></tr>'
                     )
                     run_html.append("</table>")
-                elif res.result_type == "pls":
+                elif isinstance(res, PLSResult):
                     run_html.append(f'<div style="{section_style}">PLS</div>')
                     run_html.append('<table cellspacing="6" style="width: 100%;">')
                     run_html.append(
                         f'<tr><td style="{label_style}">Components</td>'
                         f'<td style="{value_style}">{res.n_components}</td></tr>'
                     )
-                    if res.p_method:
+                    if res.fit_info and res.fit_info.p_method:
                         run_html.append(
                             f'<tr><td style="{label_style}">p-value Method</td>'
-                            f'<td style="{value_style}">{res.p_method}</td></tr>'
+                            f'<td style="{value_style}">{res.fit_info.p_method}</td></tr>'
                         )
                     run_html.append("</table>")
 
         # Pairwise results — shown in Result Information for fulldoc,
         # in Concept Configuration for lexicon mode
-        if is_crossgroup and result._result and hasattr(result._result, 'results_table'):
+        if is_crossgroup and result._result and hasattr(result._result, 'pairs'):
             pairwise_html = self._build_pairwise_html(
-                result._result.results_table(), section_style, label_style, p
+                result._result, section_style, label_style, p
             )
             if is_fulldoc:
                 run_html.extend(pairwise_html)
@@ -2356,7 +2710,7 @@ class Stage3Widget(QWidget):
                 concept_html.append("</table>")
 
             # Pairwise results table (crossgroup + lexicon mode)
-            if is_crossgroup and result._result and hasattr(result._result, 'results_table'):
+            if is_crossgroup and result._result and hasattr(result._result, 'pairs'):
                 concept_html.extend(pairwise_html)
 
             self.concept_config_text.setHtml("".join(concept_html))
@@ -2387,10 +2741,10 @@ class Stage3Widget(QWidget):
             f'<tr><td style="{label_style}">L2 Normalize</td>'
             f'<td style="{value_style}">{"Yes" if emb.get("l2_normalized", False) else "No"}</td></tr>'
         )
-        _abtt_m = emb.get("abtt_m", 0)
+        _abtt = emb.get("abtt", 0)
         model_html.append(
             f'<tr><td style="{label_style}">ABTT</td>'
-            f'<td style="{value_style}">{"Yes" if _abtt_m > 0 else "No"} (m={_abtt_m})</td></tr>'
+            f'<td style="{value_style}">{"Yes" if _abtt > 0 else "No"} (m={_abtt})</td></tr>'
         )
         if emb.get("coverage_pct", 0) > 0:
             cov_str = f"{emb.get('coverage_pct', 0):.1f}%"
@@ -2477,7 +2831,7 @@ class Stage3Widget(QWidget):
             if _pls_p_method in ("split", "split_cal", "auto"):
                 model_html.append(
                     f'<tr><td style="{label_style}">n Splits</td>'
-                    f'<td style="{value_style}">{hp.get("pls_n_splits", 100)}</td></tr>'
+                    f'<td style="{value_style}">{hp.get("pls_n_splits", Project.__dataclass_fields__["pls_n_splits"].default)}</td></tr>'
                 )
                 model_html.append(
                     f'<tr><td style="{label_style}">Split Ratio</td>'
@@ -2504,7 +2858,7 @@ class Stage3Widget(QWidget):
             if _pcaols_n_comp is None:
                 model_html.append(
                     f'<tr><td style="{label_style}">K Range</td>'
-                    f'<td style="{value_style}">{hp.get("sweep_k_min", 1)} \u2013 {hp.get("sweep_k_max", 50)} (step {hp.get("sweep_k_step", 1)})</td></tr>'
+                    f'<td style="{value_style}">{hp.get("sweep_k_min", Project.__dataclass_fields__["sweep_k_min"].default)} \u2013 {hp.get("sweep_k_max", Project.__dataclass_fields__["sweep_k_max"].default)} (step {hp.get("sweep_k_step", Project.__dataclass_fields__["sweep_k_step"].default)})</td></tr>'
                 )
 
         # Groups-specific
@@ -2558,17 +2912,17 @@ class Stage3Widget(QWidget):
 
     def _load_pca_sweep_tab(self, result: Result):
         """Load the PCA sweep figure into the tab."""
-        selected_k = result._result.n_components if result._result and result._result.result_type == "pca_ols" else None
+        selected_k = result._result.n_components if result._result and isinstance(result._result, PCAOLSResult) else None
 
         if selected_k is not None:
             self.pca_sweep_info.setText(f"Selected PCA K: {selected_k}")
         else:
             self.pca_sweep_info.setText("PCA K was set manually (no sweep performed).")
 
-        # Try to render sweep plot from saved data (or live result),
-        # then fall back to legacy sweep_plot.png from older runs.
+        # Render from live sweep_result; fall back to legacy sweep_plot.png
+        # only for saved results (unsaved results have no folder on disk yet).
         pixmap = self._render_sweep_pixmap(result)
-        if pixmap is None:
+        if pixmap is None and result.result_path is not None:
             sweep_png = result.result_path / "sweep_plot.png"
             if sweep_png.exists():
                 candidate = QPixmap(str(sweep_png))
@@ -2588,25 +2942,12 @@ class Stage3Widget(QWidget):
 
     @staticmethod
     def _render_sweep_pixmap(result: Result):
-        """Render sweep chart from data. Returns QPixmap or None."""
+        """Render sweep chart from the live result's sweep_result. Returns QPixmap or None."""
         from ..utils.charts import render_sweep_plot
-        import json
 
-        # Prefer live result data
         sweep = getattr(result._result, "sweep_result", None) if result._result else None
         if sweep is not None:
             return render_sweep_plot(sweep.df_joined, sweep.best_k)
-
-        # Fall back to saved JSON
-        sweep_json = result.result_path / "sweep_data.json"
-        if sweep_json.exists():
-            try:
-                with open(sweep_json) as f:
-                    data = json.load(f)
-                return render_sweep_plot(data["rows"], data["best_k"])
-            except Exception:
-                pass
-
         return None
 
     def _pca_sweep_apply_zoom(self):
@@ -2712,20 +3053,43 @@ class Stage3Widget(QWidget):
         return self._unsaved_result is not None
 
     def _save_result(self):
-        """Add the unsaved result to the project."""
-        if self._unsaved_result is None or self.project is None:
+        """Save an unsaved result, or re-save (overwrite in place) a saved one."""
+        if self.project is None or self.current_result is None:
+            return
+
+        if self._is_viewing_unsaved:
+            self._save_new_result()
+        else:
+            self._overwrite_saved_result()
+
+    def _save_new_result(self):
+        """Persist the unsaved result: create its folder, write all files, register in project."""
+        if self._unsaved_result is None:
             return
 
         result = self._unsaved_result
 
-        # Optional name from the text input
+        # Optional name from the text input — drives both display and folder name
         name = self.run_name_input.text().strip()
         if name:
             result.name = name
 
-        # Add to project (in memory — Save Project persists to project.json)
-        self.project.results.append(result)
-        self.project.mark_dirty()
+        # Resolve folder name: sanitized user name, else timestamp fallback.
+        # Append _2, _3… on collision so repeated names never overwrite prior runs.
+        folder_base = _sanitize_folder_name(name) if name else ""
+        if not folder_base:
+            folder_base = result.result_id
+        results_dir = self.project.project_path / "results"
+        folder_name = _resolve_folder_collision(results_dir, folder_base)
+
+        result.folder_name = folder_name
+        result.result_path = results_dir / folder_name
+
+        # Write everything to disk now
+        from ..utils.file_io import ProjectIO
+        result.result_path.mkdir(parents=True, exist_ok=True)
+        ProjectIO.save_result_config(result)
+        ProjectIO.save_result(result)
 
         # Save sweep plot PNG if available
         if self._pca_sweep_pixmap is not None:
@@ -2735,23 +3099,51 @@ class Stage3Widget(QWidget):
             except Exception:
                 pass  # Non-critical
 
+        # Register in project (Save Project persists the list to project.json)
+        self.project.results.append(result)
+        self.project.mark_dirty()
+
         # Clear unsaved state
         self._unsaved_result = None
         self._is_viewing_unsaved = False
 
         # Update the selector entry in-place (no full reload)
-        display_name = result.name or result.result_id
-        label = f"{display_name} ({result.result_id})"
-        self.result_selector.setItemText(self.result_selector.currentIndex(), label)
+        self.result_selector.setItemText(
+            self.result_selector.currentIndex(), _result_dropdown_label(result),
+        )
 
-        # Hide save controls
+        # Now viewing a saved result — flip the button to "Overwrite"
         self.run_name_input.hide()
-        self.save_result_btn.hide()
+        self.save_result_btn.setText("Overwrite")
+        self.save_result_btn.setToolTip(
+            "Re-save this result in place (updates report / files)"
+        )
 
         self.result_saved.emit()
 
+    def _overwrite_saved_result(self):
+        """Re-save a saved result in place (regenerate files, keep result_id)."""
+        result = self.current_result
+        if result is None or result._result is None:
+            return
+
+        from ..utils.file_io import ProjectIO
+        ProjectIO.save_result_config(result)
+        ProjectIO.save_result(result)
+
+        # Keep the sweep PNG in sync with what the user is viewing
+        if self._pca_sweep_pixmap is not None:
+            try:
+                sweep_png = result.result_path / "sweep_plot.png"
+                self._pca_sweep_pixmap.save(str(sweep_png), "PNG")
+            except Exception:
+                pass
+
+        self.project.mark_dirty()
+        self.result_saved.emit()
+
     def _delete_result_by_index(self, row: int):
-        """Delete a saved result after confirmation."""
+        """Remove a result: trash its folder (if present) and drop it from the project."""
         result = self.result_selector.itemData(row)
         if result is None or result is self._unsaved_result:
             return
@@ -2759,13 +3151,22 @@ class Stage3Widget(QWidget):
         self.result_selector.hidePopup()
 
         display_name = result.name or result.result_id
+        is_missing = result.status == "missing" or result.result_path is None
+
+        if is_missing:
+            prompt = (
+                f"Remove the missing reference to \"{display_name}\" "
+                "from this project?"
+            )
+        else:
+            prompt = (
+                f"Move \"{display_name}\" to the system trash?\n\n"
+                "The folder will be recoverable from trash."
+            )
+
         reply = QMessageBox.question(
-            self,
-            "Delete Result",
-            f"Permanently delete \"{display_name}\"?\n\n"
-            "All data will be removed and this cannot be undone.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            self, "Remove Result", prompt,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
@@ -2773,13 +3174,20 @@ class Stage3Widget(QWidget):
         if self.project and result in self.project.results:
             self.project.results.remove(result)
 
-        if result.result_path.exists():
-            import subprocess
+        if not is_missing and result.result_path and result.result_path.exists():
             try:
-                subprocess.run(["trash-put", str(result.result_path)], check=True)
-            except (FileNotFoundError, subprocess.CalledProcessError):
-                import shutil
-                shutil.rmtree(result.result_path)
+                from send2trash import send2trash
+                send2trash(str(result.result_path))
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Delete Failed",
+                    f"Could not move to trash:\n{e}\n\n"
+                    "The folder is still on disk.",
+                )
+                # Re-insert so the UI stays consistent with disk
+                if self.project and result not in self.project.results:
+                    self.project.results.append(result)
+                return
 
         from ..utils.file_io import ProjectIO
         if self.project:

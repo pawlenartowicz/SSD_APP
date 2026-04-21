@@ -1,7 +1,5 @@
 """SSD analysis runner thread — uses ssdiff v1.0.0 API."""
 
-import json
-import math
 import sys
 import traceback
 from datetime import datetime
@@ -36,16 +34,6 @@ def _debug_log(msg: str) -> None:
 
 
 from ..models.project import Project, Result, DEFAULT_RANDOM_SEED  # noqa: E402
-from ..utils.file_io import ProjectIO  # noqa: E402
-
-
-def _sanitize_for_json(v):
-    """Convert numpy types and NaN/Inf to JSON-safe values."""
-    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-        return None
-    if hasattr(v, "item"):  # numpy scalar
-        return v.item()
-    return v
 
 
 class SSDRunner(QThread):
@@ -67,20 +55,16 @@ class SSDRunner(QThread):
     def run(self):
         """Execute the SSD analysis pipeline."""
         try:
-            # Create result object
+            # Build an in-memory Result — nothing is written to disk here.
+            # The result folder, config.json, results.pkl, report and sweep
+            # plot are only written when the user clicks Save in Stage 3.
             result_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-            result_path = self.project.project_path / "results" / result_id
-
             result = Result(
                 result_id=result_id,
                 timestamp=datetime.now(),
-                result_path=result_path,
                 config_snapshot=self.project.snapshot_config(),
                 status="running",
             )
-
-            result_path.mkdir(parents=True, exist_ok=True)
-            ProjectIO.save_result_config(result)
 
             if self._is_cancelled:
                 return
@@ -127,6 +111,11 @@ class SSDRunner(QThread):
         if corpus is None:
             lang = self.project.language
             corpus = Corpus(docs, pretokenized=True, lang=lang)
+
+        # Snippet extraction reads corpus.pre_docs; Corpus(pretokenized=True)
+        # leaves it as None, so attach the cached preprocessed docs here.
+        if pre_docs is not None and getattr(corpus, "pre_docs", None) is None:
+            corpus.pre_docs = pre_docs
 
         # Lexicon / full-doc mode
         lexicon = set()
@@ -192,31 +181,46 @@ class SSDRunner(QThread):
         """
         clustering_topn = project.clustering_topn
 
-        result.top_words(n=50)
+        _ = result.words
 
+        k = None if project.clustering_k_auto else project.clustering_k_min
+        cluster_kwargs = dict(
+            topn=clustering_topn,
+            k=k, k_min=project.clustering_k_min, k_max=project.clustering_k_max,
+        )
+
+        paired_clusters = hasattr(result.clusters, "_views")
+        sided_views: list = []
         try:
-            k = None if project.clustering_k_auto else project.clustering_k_min
-            result.cluster_neighbors(
-                side="pos", topn=clustering_topn,
-                k=k, k_min=project.clustering_k_min, k_max=project.clustering_k_max,
-            )
-            result.cluster_neighbors(
-                side="neg", topn=clustering_topn,
-                k=k, k_min=project.clustering_k_min, k_max=project.clustering_k_max,
-            )
+            if paired_clusters:
+                for pair_key, pair_idx in result.clusters._views.items():
+                    sided_views.append((pair_key, pair_idx.pos(**cluster_kwargs)))
+                    sided_views.append((pair_key, pair_idx.neg(**cluster_kwargs)))
+            else:
+                sided_views.append((None, result.clusters.pos(**cluster_kwargs)))
+                sided_views.append((None, result.clusters.neg(**cluster_kwargs)))
         except Exception as e:
             _debug_log(f"Clustering failed: {e}\n{traceback.format_exc()}")
 
         if pre_docs:
             try:
-                result.snippets(pre_docs, top_per_side=200)
+                if paired_clusters:
+                    for pair_key in result.snippets._views:
+                        result.snippets[pair_key](top_per_side=200)
+                else:
+                    result.snippets(top_per_side=200)
             except Exception as e:
                 _debug_log(f"Snippets failed: {e}\n{traceback.format_exc()}")
 
-            try:
-                result.cluster_snippets(pre_docs, top_per_cluster=100)
-            except Exception as e:
-                _debug_log(f"Cluster snippets failed: {e}\n{traceback.format_exc()}")
+            for _pair_key, side_view in sided_views:
+                if side_view is None or getattr(side_view, "_parent", None) is None:
+                    continue
+                try:
+                    _ = side_view.snippets
+                except Exception as e:
+                    _debug_log(
+                        f"Cluster snippets failed: {e}\n{traceback.format_exc()}"
+                    )
 
     def _resolve_random_state(self, rs_str: str) -> int:
         """Convert "default" or str(int) to an int seed."""
@@ -280,7 +284,7 @@ class SSDRunner(QThread):
         if self._is_cancelled:
             return
 
-        self.progress.emit(85, "Saving results...")
+        self.progress.emit(85, "Finalizing...")
         self._finalize_result(result, ssd_result,
                               cov_summary=cov_summary, cov_per_token=cov_per_token)
 
@@ -315,7 +319,7 @@ class SSDRunner(QThread):
         cb = make_progress_cb(self.progress, 10, 45, "PCA sweep")
         with progress_hook(cb):
             ssd_result = ssd.fit_ols(
-                n_components=n_comp,
+                fixed_k=n_comp,
                 k_min=p.sweep_k_min,
                 k_max=p.sweep_k_max,
                 k_step=p.sweep_k_step,
@@ -323,22 +327,6 @@ class SSDRunner(QThread):
 
         if self._is_cancelled:
             return
-
-        self.progress.emit(45, "Saving sweep data...")
-
-        # Save sweep data as JSON (rendered in the GUI via QPainter)
-        if ssd_result.sweep_result is not None:
-            try:
-                sweep = ssd_result.sweep_result
-                clean_rows = [
-                    {k: _sanitize_for_json(val) for k, val in row.items()}
-                    for row in sweep.df_joined
-                ]
-                sweep_path = result.result_path / "sweep_data.json"
-                with open(sweep_path, "w") as f:
-                    json.dump({"best_k": int(sweep.best_k), "rows": clean_rows}, f)
-            except Exception as e:
-                _debug_log(f"[pca_ols] Sweep data save failed: {e}\n{traceback.format_exc()}")
 
         self.progress.emit(50, "Caching interpretation data...")
 
@@ -348,7 +336,7 @@ class SSDRunner(QThread):
         if self._is_cancelled:
             return
 
-        self.progress.emit(80, "Saving results...")
+        self.progress.emit(80, "Finalizing...")
         self._finalize_result(result, ssd_result,
                               cov_summary=cov_summary, cov_per_token=cov_per_token)
 
@@ -400,7 +388,7 @@ class SSDRunner(QThread):
         if self._is_cancelled:
             return
 
-        self.progress.emit(85, "Saving results...")
+        self.progress.emit(85, "Finalizing...")
         self._finalize_result(result, ssd_result,
                               cov_summary=cov_summary, cov_per_token=cov_per_token)
 
@@ -410,7 +398,11 @@ class SSDRunner(QThread):
 
     def _finalize_result(self, result, ssd_result,
                          cov_summary=None, cov_per_token=None):
-        """Save result and emit completion signal."""
+        """Attach the ssdiff result to the in-memory Result and signal done.
+
+        Nothing is written to disk here — persistence happens in Stage 3
+        when the user clicks Save.
+        """
         result._result = ssd_result
         result.status = "complete"
 
@@ -418,9 +410,6 @@ class SSDRunner(QThread):
             result.config_snapshot["lexicon_coverage_summary"] = cov_summary
         if cov_per_token is not None:
             result.config_snapshot["lexicon_coverage_per_token"] = cov_per_token
-
-        ProjectIO.save_result_config(result)
-        ProjectIO.save_result(result)
 
         self.progress.emit(100, "Complete!")
         self.finished.emit(result)

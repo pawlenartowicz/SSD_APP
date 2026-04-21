@@ -442,6 +442,48 @@ def build_current_palette() -> ThemePalette:
     return palette
 
 
+def build_qpalette(p: ThemePalette) -> "QPalette":
+    """Build a Qt QPalette from a ThemePalette.
+
+    Needed because top-level chrome that QSS doesn't reach
+    (QComboBox popup container, native menu frames, tooltips)
+    falls back to the QPalette. Without this, those frames
+    render with Fusion's default light colors.
+    """
+    from PySide6.QtGui import QColor, QPalette
+
+    qp = QPalette()
+    base = QColor(p.bg_base)
+    surface = QColor(p.bg_surface)
+    card = QColor(p.bg_card)
+    inp = QColor(p.bg_input)
+    text = QColor(p.text_primary)
+    text_muted = QColor(p.text_muted)
+    accent = QColor(p.accent)
+    on_accent = QColor(p.text_on_accent)
+    selection = QColor(p.selection)
+    disabled = QColor(p.disabled_text)
+
+    qp.setColor(QPalette.Window, base)
+    qp.setColor(QPalette.WindowText, text)
+    qp.setColor(QPalette.Base, card)
+    qp.setColor(QPalette.AlternateBase, surface)
+    qp.setColor(QPalette.Text, text)
+    qp.setColor(QPalette.Button, inp)
+    qp.setColor(QPalette.ButtonText, text)
+    qp.setColor(QPalette.ToolTipBase, card)
+    qp.setColor(QPalette.ToolTipText, text)
+    qp.setColor(QPalette.PlaceholderText, text_muted)
+    qp.setColor(QPalette.Highlight, selection)
+    qp.setColor(QPalette.HighlightedText, on_accent)
+    qp.setColor(QPalette.Link, accent)
+    qp.setColor(QPalette.LinkVisited, accent)
+    qp.setColor(QPalette.Disabled, QPalette.Text, disabled)
+    qp.setColor(QPalette.Disabled, QPalette.WindowText, disabled)
+    qp.setColor(QPalette.Disabled, QPalette.ButtonText, disabled)
+    return qp
+
+
 def generate_stylesheet(p: ThemePalette | None = None) -> str:
     """Generate the full application QSS from a ThemePalette."""
     if p is None:
