@@ -32,12 +32,15 @@ class PolesTab:
         outer = QVBoxLayout(tab)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        ctrl = QHBoxLayout()
+        ctrl_frame = QWidget()
+        ctrl = QHBoxLayout(ctrl_frame)
+        ctrl.setContentsMargins(4, 4, 4, 0)
         ctrl.addWidget(
             pair_selector.make_pair_selector(on_pair_changed, pair_combos, pair_frames)
         )
         ctrl.addStretch()
-        outer.addLayout(ctrl)
+        outer.addWidget(ctrl_frame)
+        pair_frames.append(ctrl_frame)
 
         body = QWidget()
         layout = QHBoxLayout(body)

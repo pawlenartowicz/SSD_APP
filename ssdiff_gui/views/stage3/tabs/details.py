@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtWidgets import QTextEdit, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QGroupBox,
+    QSplitter,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ssdiff import GroupResult, PCAOLSResult, PLSResult
 
@@ -677,15 +684,44 @@ def _concept_config_html(view, p) -> list[str]:
 
 class DetailsTab:
     def __init__(self):
-        self._text: QTextEdit | None = None
+        self._result_info_text: QTextEdit | None = None
+        self._concept_config_text: QTextEdit | None = None
+        self._model_config_text: QTextEdit | None = None
+        self._concept_group: QGroupBox | None = None
 
     def create(self, parent) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 0, 0, 0)
-        self._text = QTextEdit()
-        self._text.setReadOnly(True)
-        layout.addWidget(self._text, stretch=1)
+
+        splitter = QSplitter(Qt.Horizontal)
+
+        result_group = QGroupBox("Result Information")
+        result_layout = QVBoxLayout()
+        self._result_info_text = QTextEdit()
+        self._result_info_text.setReadOnly(True)
+        result_layout.addWidget(self._result_info_text)
+        result_group.setLayout(result_layout)
+        splitter.addWidget(result_group)
+
+        self._concept_group = QGroupBox("Concept Configuration")
+        concept_layout = QVBoxLayout()
+        self._concept_config_text = QTextEdit()
+        self._concept_config_text.setReadOnly(True)
+        concept_layout.addWidget(self._concept_config_text)
+        self._concept_group.setLayout(concept_layout)
+        splitter.addWidget(self._concept_group)
+
+        model_group = QGroupBox("Model Configuration")
+        model_layout = QVBoxLayout()
+        self._model_config_text = QTextEdit()
+        self._model_config_text.setReadOnly(True)
+        model_layout.addWidget(self._model_config_text)
+        model_group.setLayout(model_layout)
+        splitter.addWidget(model_group)
+
+        splitter.setSizes([250, 350, 400])
+        layout.addWidget(splitter, stretch=1)
         return tab
 
     def load(self, view) -> None:
@@ -695,25 +731,31 @@ class DetailsTab:
         if meta is not None:
             is_fulldoc = meta.config_snapshot.get("concept_mode", "lexicon") == "fulldoc"
 
-        html: list[str] = []
-        html += _common_header_html(view, p)
-        html += _run_config_html(view, p)
+        result_html: list[str] = []
+        result_html += _common_header_html(view, p)
 
         if view.analysis_type == "pls":
-            html += _pls_fit_html(view, p)
+            result_html += _pls_fit_html(view, p)
         elif view.analysis_type == "pca_ols":
-            html += _pca_ols_fit_html(view, p)
+            result_html += _pca_ols_fit_html(view, p)
         else:
-            html += _group_fit_html(view, p)
+            result_html += _group_fit_html(view, p)
             if is_fulldoc:
-                html += _pairwise_table_html(view, p)
+                result_html += _pairwise_table_html(view, p)
 
-        if not is_fulldoc:
-            html += _concept_config_html(view, p)
+        self._result_info_text.setHtml("".join(result_html))
+
+        if is_fulldoc:
+            self._concept_group.hide()
+            self._concept_config_text.clear()
+        else:
+            self._concept_group.show()
+            concept_html = _concept_config_html(view, p)
             if view.analysis_type == "groups":
-                html += _pairwise_table_html(view, p)
+                concept_html += _pairwise_table_html(view, p)
+            self._concept_config_text.setHtml("".join(concept_html))
 
-        self._text.setHtml("".join(html))
+        self._model_config_text.setHtml("".join(_run_config_html(view, p)))
 
     def is_visible_for(self, view) -> bool:
         return True

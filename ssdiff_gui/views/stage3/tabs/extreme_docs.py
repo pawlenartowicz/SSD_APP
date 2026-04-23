@@ -36,38 +36,42 @@ class ExtremeDocsTab:
         outer = QVBoxLayout(tab)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        ctrl = QHBoxLayout()
+        ctrl_frame = QWidget()
+        ctrl = QHBoxLayout(ctrl_frame)
         ctrl.setContentsMargins(4, 4, 4, 0)
         ctrl.addWidget(
             pair_selector.make_pair_selector(on_pair_changed, pair_combos, pair_frames)
         )
         ctrl.addStretch()
-        outer.addLayout(ctrl)
+        outer.addWidget(ctrl_frame)
+        pair_frames.append(ctrl_frame)
 
         splitter = QSplitter(Qt.Vertical)
 
         high_group = QGroupBox("Highest Scoring")
         high_layout = QVBoxLayout()
-        self._high_table = QTableWidget()
-        self._high_table.setAlternatingRowColors(True)
-        self._high_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._high_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._high_table = self._make_table()
         high_layout.addWidget(self._high_table)
         high_group.setLayout(high_layout)
         splitter.addWidget(high_group)
 
         low_group = QGroupBox("Lowest Scoring")
         low_layout = QVBoxLayout()
-        self._low_table = QTableWidget()
-        self._low_table.setAlternatingRowColors(True)
-        self._low_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._low_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._low_table = self._make_table()
         low_layout.addWidget(self._low_table)
         low_group.setLayout(low_layout)
         splitter.addWidget(low_group)
 
         outer.addWidget(splitter, stretch=1)
         return tab
+
+    @staticmethod
+    def _make_table() -> QTableWidget:
+        t = QTableWidget()
+        t.setAlternatingRowColors(True)
+        t.setEditTriggers(QTableWidget.NoEditTriggers)
+        t.setSelectionBehavior(QTableWidget.SelectRows)
+        return t
 
     def load(self, view) -> None:
         """Populate the extreme documents tab from view."""
@@ -117,7 +121,6 @@ class ExtremeDocsTab:
                 table.setItem(row_i, 1, QTableWidgetItem(text))
                 table.setItem(row_i, 2, QTableWidgetItem(f"{scores[doc_id]:.4f}"))
                 table.setItem(row_i, 3, QTableWidgetItem(g_display))
-            table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
             table.resizeColumnsToContents()
             table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
 
@@ -144,7 +147,6 @@ class ExtremeDocsTab:
                 table.setItem(row_i, 1, QTableWidgetItem(text))
                 table.setItem(row_i, 2, QTableWidgetItem(f"{d.alignment_score:.4f}"))
                 table.setItem(row_i, 3, QTableWidgetItem(f"{d.y_true:.4f}"))
-            table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
             table.resizeColumnsToContents()
             table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
 

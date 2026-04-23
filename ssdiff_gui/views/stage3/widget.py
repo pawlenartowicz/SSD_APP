@@ -65,12 +65,23 @@ def _sanitize_folder_name(name: str) -> str:
     return name
 
 
-def _resolve_folder_collision(results_dir: Path, base: str) -> str:
-    """Return `base`, or `base_2`, `base_3`… so the folder doesn't exist yet."""
-    if not (results_dir / base).exists():
+def _resolve_folder_collision(
+    results_dir: Path, base: str, reserved: set[str] = frozenset(),
+) -> str:
+    """Return `base`, or `base_2`, `base_3`… so the folder name is free.
+
+    A name is taken if its folder exists on disk OR if it's in `reserved`.
+    Reserving tracked names (even ones whose folders were trashed) prevents
+    re-using a folder_name that the project still references as [missing],
+    which would create duplicates in project.json.
+    """
+    def taken(name: str) -> bool:
+        return (results_dir / name).exists() or name in reserved
+
+    if not taken(base):
         return base
     i = 2
-    while (results_dir / f"{base}_{i}").exists():
+    while taken(f"{base}_{i}"):
         i += 1
     return f"{base}_{i}"
 
@@ -822,7 +833,12 @@ class Stage3Widget(QWidget):
         if not folder_base:
             folder_base = result.result_id
         results_dir = self.project.project_path / "results"
-        folder_name = _resolve_folder_collision(results_dir, folder_base)
+        tracked_names = {
+            r.folder_name for r in self.project.results if r.folder_name
+        }
+        folder_name = _resolve_folder_collision(
+            results_dir, folder_base, reserved=tracked_names,
+        )
 
         result.folder_name = folder_name
         result.result_path = results_dir / folder_name
@@ -887,15 +903,24 @@ class Stage3Widget(QWidget):
         self.result_saved.emit()
 
     def _delete_result_by_index(self, row: int):
-        """Remove a result: trash its folder (if present) and drop it from the project."""
+        """Remove a result: drop it from the project, then trash its folder (if present).
+
+        Order matters: we persist the project.json update *before* touching the
+        filesystem. If the trash step fails later, the folder stays on disk and
+        will show up as an orphan on next load — the project config is already
+        consistent with the user's intent.
+        """
         result = self.result_selector.itemData(row)
         if result is None or result is self._unsaved_result:
+            return
+        if self.project is None:
             return
 
         self.result_selector.hidePopup()
 
         display_name = result.name or result.result_id
         is_missing = result.status == "missing" or result.result_path is None
+        folder_path = result.result_path if not is_missing else None
 
         if is_missing:
             prompt = (
@@ -915,26 +940,24 @@ class Stage3Widget(QWidget):
         if reply != QMessageBox.Yes:
             return
 
-        if self.project and result in self.project.results:
-            self.project.results.remove(result)
+        from ...utils.file_io import ProjectIO
 
-        if not is_missing and result.result_path and result.result_path.exists():
+        if result in self.project.results:
+            self.project.results.remove(result)
+        ProjectIO.save_project(self.project)
+        self.project.mark_dirty()
+
+        if folder_path is not None and folder_path.exists():
             try:
                 from send2trash import send2trash
-                send2trash(str(result.result_path))
+                send2trash(str(folder_path))
             except Exception as e:
                 QMessageBox.critical(
                     self, "Delete Failed",
-                    f"Could not move to trash:\n{e}\n\n"
-                    "The folder is still on disk.",
+                    f"The project no longer tracks this result, "
+                    f"but the folder could not be moved to trash:\n{e}\n\n"
+                    f"The folder is still on disk and will appear as an "
+                    f"orphan next time the project is opened.",
                 )
-                # Re-insert so the UI stays consistent with disk
-                if self.project and result not in self.project.results:
-                    self.project.results.append(result)
-                return
-
-        from ...utils.file_io import ProjectIO
-        if self.project:
-            ProjectIO.save_project(self.project)
 
         self._populate_result_selector()

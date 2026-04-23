@@ -53,8 +53,10 @@ class SnippetsTab:
         tab = QWidget()
         self._widget = tab
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         controls = QHBoxLayout()
+        controls.setContentsMargins(4, 4, 4, 0)
         controls.addWidget(
             pair_selector.make_pair_selector(on_pair_changed, pair_combos, pair_frames)
         )

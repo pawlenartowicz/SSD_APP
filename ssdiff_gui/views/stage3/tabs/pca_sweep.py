@@ -35,8 +35,10 @@ class PcaSweepTab:
         tab = QWidget()
         self._widget = tab
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         header = QHBoxLayout()
+        header.setContentsMargins(4, 4, 4, 0)
 
         self._info = QLabel()
         self._info.setWordWrap(True)
