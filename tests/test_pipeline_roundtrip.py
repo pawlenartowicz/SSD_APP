@@ -157,8 +157,9 @@ class TestSaveArtifacts:
         report_path = result.result_path / "results.txt"
         assert report_path.exists(), "results.txt not generated"
         content = report_path.read_text(encoding="utf-8")
-        assert "Please cite as: Plisiecki" in content
-        assert "SSD Model Summary" in content
+        assert "Please cite as:" in content
+        assert "Plisiecki" in content
+        assert "PLSResult" in content
 
     def test_groups_results_txt(self, tmp_path, tiny_embeddings, synthetic_corpus):
         from ssdiff import SSD
@@ -185,7 +186,8 @@ class TestSaveArtifacts:
         report_path = result.result_path / "results.txt"
         assert report_path.exists(), "results.txt not generated for group result"
         content = report_path.read_text(encoding="utf-8")
-        assert "Please cite as: Plisiecki" in content
+        assert "Please cite as:" in content
+        assert "Plisiecki" in content
 
     def test_pcaols_results_txt(self, tmp_path, tiny_embeddings, synthetic_corpus):
         from ssdiff import SSD
@@ -212,7 +214,8 @@ class TestSaveArtifacts:
         report_path = result.result_path / "results.txt"
         assert report_path.exists(), "results.txt not generated for PCA+OLS result"
         content = report_path.read_text(encoding="utf-8")
-        assert "Please cite as: Plisiecki" in content
+        assert "Please cite as:" in content
+        assert "Plisiecki" in content
         assert "PCA+OLS" in content
 
     def test_pcaols_sweep_png(self, tmp_path, tiny_embeddings, synthetic_corpus):

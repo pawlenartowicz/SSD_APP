@@ -139,7 +139,7 @@ class TestProjectSaveLoad:
         assert r.timestamp == datetime(2026, 4, 14, 14, 30, 0)
 
     def test_missing_result_skips(self, tmp_path):
-        """project.json references nonexistent result → warns, doesn't crash."""
+        """project.json references nonexistent result → keeps a 'missing' marker."""
         project = _make_project(tmp_path)
         ProjectIO.create_project_structure(project.project_path)
 
@@ -150,7 +150,11 @@ class TestProjectSaveLoad:
             json.dump(project_dict, f)
 
         loaded = ProjectIO.load_project(project.project_path)
-        assert len(loaded.results) == 0
+        assert len(loaded.results) == 1
+        marker = loaded.results[0]
+        assert marker.result_id == "nonexistent_result_id"
+        assert marker.status == "missing"
+        assert marker.result_path is None
 
 
 # ===================================================================

@@ -414,7 +414,7 @@ class MainWindow(QMainWindow):
         # Import here to avoid circular imports
         from .stage1_setup import Stage1Widget
         from .stage2_concept import Stage2Widget
-        from .stage3_results import Stage3Widget
+        from .stage3 import Stage3Widget
 
         # Stage 1
         self.stage1_widget = Stage1Widget()

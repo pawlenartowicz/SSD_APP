@@ -189,11 +189,11 @@ class SSDRunner(QThread):
             k=k, k_min=project.clustering_k_min, k_max=project.clustering_k_max,
         )
 
-        paired_clusters = hasattr(result.clusters, "_views")
+        paired_clusters = hasattr(result.clusters, "_leaves")
         sided_views: list = []
         try:
             if paired_clusters:
-                for pair_key, pair_idx in result.clusters._views.items():
+                for pair_key, pair_idx in result.clusters._leaves.items():
                     sided_views.append((pair_key, pair_idx.pos(**cluster_kwargs)))
                     sided_views.append((pair_key, pair_idx.neg(**cluster_kwargs)))
             else:
@@ -205,7 +205,7 @@ class SSDRunner(QThread):
         if pre_docs:
             try:
                 if paired_clusters:
-                    for pair_key in result.snippets._views:
+                    for pair_key in result.snippets._leaves:
                         result.snippets[pair_key](top_per_side=200)
                 else:
                     result.snippets(top_per_side=200)
