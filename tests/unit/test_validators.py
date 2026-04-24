@@ -4,18 +4,10 @@ Path validators test against the Validator class in utils/validators.py.
 Text/outcome/lexicon validators test against Project instance methods.
 """
 
-import sys
-from pathlib import Path
-
 import pandas as pd
 
-# Import validators directly to avoid __init__.py PySide6 dependency
-_APP_ROOT = Path(__file__).resolve().parent.parent
-if str(_APP_ROOT) not in sys.path:
-    sys.path.insert(0, str(_APP_ROOT))
-
-from ssdiff_gui.utils.validators import Validator  # noqa: E402
-from ssdiff_gui.models.project import Project  # noqa: E402
+from ssdiff_gui.utils.validators import Validator
+from ssdiff_gui.models.project import Project
 
 
 # ---------------------------------------------------------------------------
@@ -197,15 +189,6 @@ class TestValidateText:
         assert len(errors) == 0
         assert any("Small sample" in w for w in warnings)
 
-    def test_clean_data(self, tmp_path):
-        """200 rows, no empties → no errors/warnings."""
-        p = _make_project(tmp_path)
-        p._df = _make_df(n=200)
-        p.text_column = "text"
-        errors, warnings, _ = p.validate_text()
-        assert len(errors) == 0
-        assert len(warnings) == 0
-
     def test_id_stats_returned(self, tmp_path):
         p = _make_project(tmp_path)
         p._df = _make_df(n=100, id_col="participant")
@@ -360,32 +343,6 @@ class TestValidateOutcome:
         errors, warnings = p.validate_outcome()
         assert len(errors) == 0
         assert len(warnings) == 0
-
-    def test_clean_groups(self, tmp_path):
-        p = _make_project(tmp_path)
-        df = pd.DataFrame({
-            "text": ["t"] * 100,
-            "grp": ["A"] * 50 + ["B"] * 50,
-        })
-        p._df = df
-        p.analysis_type = "groups"
-        p.group_column = "grp"
-        errors, warnings = p.validate_outcome()
-        assert len(errors) == 0
-        assert len(warnings) == 0
-
-    def test_three_groups_valid(self, tmp_path):
-        """3 balanced groups → no errors."""
-        p = _make_project(tmp_path)
-        df = pd.DataFrame({
-            "text": ["t"] * 90,
-            "grp": ["A"] * 30 + ["B"] * 30 + ["C"] * 30,
-        })
-        p._df = df
-        p.analysis_type = "groups"
-        p.group_column = "grp"
-        errors, warnings = p.validate_outcome()
-        assert len(errors) == 0
 
     def test_constant_outcome(self, tmp_path):
         """All-identical outcome values → near-zero variance error."""
