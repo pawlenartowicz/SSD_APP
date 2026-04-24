@@ -6,6 +6,7 @@ exporter) work without a display.
 """
 
 import os
+import sys
 from pathlib import Path
 from datetime import datetime
 from unittest.mock import MagicMock
@@ -54,7 +55,6 @@ def pytest_configure(config):
     except (ImportError, OSError):
         try:
             import subprocess
-            import sys
             subprocess.check_call(
                 [sys.executable, "-m", "spacy", "download", "en_core_web_sm"],
                 stdout=subprocess.DEVNULL,
