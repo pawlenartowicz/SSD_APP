@@ -464,11 +464,11 @@ class Stage3Widget(QWidget):
 
         actions_layout.addStretch()
 
-        report_settings_btn = QPushButton("Report Settings")
-        report_settings_btn.setObjectName("btn_ghost")
-        report_settings_btn.setCursor(Qt.PointingHandCursor)
-        report_settings_btn.clicked.connect(self._open_report_settings)
-        actions_layout.addWidget(report_settings_btn)
+        save_settings_btn = QPushButton("Save Settings")
+        save_settings_btn.setObjectName("btn_ghost")
+        save_settings_btn.setCursor(Qt.PointingHandCursor)
+        save_settings_btn.clicked.connect(self._open_save_settings)
+        actions_layout.addWidget(save_settings_btn)
 
         # Save controls (visible for unsaved results)
         self.run_name_input = QLineEdit()
@@ -771,10 +771,12 @@ class Stage3Widget(QWidget):
         """Request a new analysis run."""
         self.new_run_requested.emit()
 
-    def _open_report_settings(self):
-        """Open the Report Settings configuration dialog."""
-        from ..report_settings_dialog import ReportSettingsDialog
-        dlg = ReportSettingsDialog(self)
+    def _open_save_settings(self):
+        """Open the Save Settings dialog."""
+        from ..save_settings_dialog import SaveSettingsDialog
+        if self.current_result is None or self.current_result._result is None:
+            return
+        dlg = SaveSettingsDialog(type(self.current_result._result), self)
         dlg.exec()
 
     # ================================================================== #
@@ -845,18 +847,14 @@ class Stage3Widget(QWidget):
 
         # Write everything to disk now
         from ...utils.file_io import ProjectIO
+        from ...utils.result_export import export_result
+        from ...utils.save_config import SaveConfig
+        from ...utils.settings import app_settings
+
         result.result_path.mkdir(parents=True, exist_ok=True)
         ProjectIO.save_result_config(result)
-        ProjectIO.save_result(result)
-
-        # Save sweep plot PNG if available
-        sweep_pixmap = self._pca_sweep_tab.pixmap
-        if sweep_pixmap is not None:
-            try:
-                sweep_png = result.result_path / "sweep_plot.png"
-                sweep_pixmap.save(str(sweep_png), "PNG")
-            except Exception:
-                pass  # Non-critical
+        cfg = SaveConfig.from_settings(app_settings())
+        export_result(result, result.result_path, cfg)
 
         # Register in project (Save Project persists the list to project.json)
         self.project.results.append(result)
@@ -887,17 +885,13 @@ class Stage3Widget(QWidget):
             return
 
         from ...utils.file_io import ProjectIO
-        ProjectIO.save_result_config(result)
-        ProjectIO.save_result(result)
+        from ...utils.result_export import export_result
+        from ...utils.save_config import SaveConfig
+        from ...utils.settings import app_settings
 
-        # Keep the sweep PNG in sync with what the user is viewing
-        sweep_pixmap = self._pca_sweep_tab.pixmap
-        if sweep_pixmap is not None:
-            try:
-                sweep_png = result.result_path / "sweep_plot.png"
-                sweep_pixmap.save(str(sweep_png), "PNG")
-            except Exception:
-                pass
+        ProjectIO.save_result_config(result)
+        cfg = SaveConfig.from_settings(app_settings())
+        export_result(result, result.result_path, cfg)
 
         self.project.mark_dirty()
         self.result_saved.emit()

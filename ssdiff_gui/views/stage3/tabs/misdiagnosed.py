@@ -47,10 +47,8 @@ class MisdiagnosedTab:
         return tab
 
     def load(self, view) -> None:
-        from ....utils.report_settings import (
-            get_report_setting, KEY_MISDIAGNOSED, KEY_SNIPPET_PREVIEW,
-        )
-        k = get_report_setting(KEY_MISDIAGNOSED)
+        from ....utils import display_limits
+        k = display_limits.MISDIAGNOSED
         if k == 0:
             self._over_table.setRowCount(0)
             self._under_table.setRowCount(0)
@@ -64,7 +62,7 @@ class MisdiagnosedTab:
             self._under_table.setRowCount(0)
             return
 
-        cap = get_report_setting(KEY_SNIPPET_PREVIEW)
+        cap = display_limits.SNIPPET_PREVIEW
         for table, side_docs in [(self._over_table, over_docs),
                                   (self._under_table, under_docs)]:
             headers = ["Rank", "Document Text", "Actual Y", "Predicted Y", "Residual"]

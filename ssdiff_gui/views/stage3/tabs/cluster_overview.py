@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import pair_selector
-from ....utils.report_settings import get_report_setting, KEY_SNIPPET_PREVIEW
+from ....utils import display_limits
 
 
 class ClusterOverviewTab:
@@ -318,7 +318,7 @@ class ClusterOverviewTab:
     # ------------------------------------------------------------------ #
 
     def _fill_snippet_table(self, snippets: list) -> None:
-        cap = get_report_setting(KEY_SNIPPET_PREVIEW)
+        cap = display_limits.SNIPPET_PREVIEW
         limit = min(len(snippets), self._cluster_snippets_spin.value())
         table = self._ov_snippet_table
         vheader = table.verticalHeader()

@@ -75,10 +75,8 @@ class ExtremeDocsTab:
 
     def load(self, view) -> None:
         """Populate the extreme documents tab from view."""
-        from ....utils.report_settings import (
-            get_report_setting, KEY_EXTREME_DOCS, KEY_SNIPPET_PREVIEW,
-        )
-        k = get_report_setting(KEY_EXTREME_DOCS)
+        from ....utils import display_limits
+        k = display_limits.EXTREME_DOCS
         if k == 0:
             self._high_table.setRowCount(0)
             self._low_table.setRowCount(0)
@@ -90,7 +88,7 @@ class ExtremeDocsTab:
             self._load_continuous(view, k)
 
     def _load_group(self, view, k: int) -> None:
-        from ....utils.report_settings import get_report_setting, KEY_SNIPPET_PREVIEW
+        from ....utils import display_limits
         try:
             scores = view.working.alignment_scores
             groups = view.source.groups
@@ -102,7 +100,7 @@ class ExtremeDocsTab:
         order_asc = np.argsort(scores)
         pos_idx = order_desc[:k]
         neg_idx = order_asc[:k]
-        cap = get_report_setting(KEY_SNIPPET_PREVIEW)
+        cap = display_limits.SNIPPET_PREVIEW
 
         for table, idx_array in [(self._high_table, pos_idx),
                                   (self._low_table, neg_idx)]:
@@ -125,14 +123,14 @@ class ExtremeDocsTab:
             table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
 
     def _load_continuous(self, view, k: int) -> None:
-        from ....utils.report_settings import get_report_setting, KEY_SNIPPET_PREVIEW
+        from ....utils import display_limits
         try:
             pos_docs = list(view.working.docs.pos(k=k))
             neg_docs = list(view.working.docs.neg(k=k))
         except Exception:
             return
 
-        cap = get_report_setting(KEY_SNIPPET_PREVIEW)
+        cap = display_limits.SNIPPET_PREVIEW
         for table, side_docs in [(self._high_table, pos_docs),
                                   (self._low_table, neg_docs)]:
             headers = ["Rank", "Document Text", "Score", "Actual Y"]

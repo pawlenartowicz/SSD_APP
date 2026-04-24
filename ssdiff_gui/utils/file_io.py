@@ -207,57 +207,14 @@ class ProjectIO:
 
     @staticmethod
     def save_result(result: Result) -> None:
-        """Save the library result object as pickle and generate replication script."""
-        if result._result is not None:
-            result.result_path.mkdir(parents=True, exist_ok=True)
-            results_file = result.result_path / "results.pkl"
-            # Strip the heavy Embeddings reference before pickling —
-            # it will be re-attached from the project on load.
-            ssd_result = result._result
-            saved_emb = getattr(ssd_result, "embeddings", None)
-            ssd_result.embeddings = None
-            try:
-                with open(results_file, "wb") as f:
-                    pickle.dump(ssd_result, f, protocol=pickle.HIGHEST_PROTOCOL)
-            finally:
-                ssd_result.embeddings = saved_emb
-
-            # Generate human-readable report from report settings
-            try:
-                from ssdiff import GroupResult
-                from .report_settings import (
-                    get_report_setting,
-                    KEY_TOP_WORDS, KEY_CLUSTERS,
-                    KEY_EXTREME_DOCS, KEY_MISDIAGNOSED,
-                )
-                kwargs = {
-                    "top_words": get_report_setting(KEY_TOP_WORDS) or None,
-                    "clusters": get_report_setting(KEY_CLUSTERS) or None,
-                }
-                if not isinstance(result._result, GroupResult):
-                    kwargs["extreme_docs"] = get_report_setting(KEY_EXTREME_DOCS) or None
-                    kwargs["misdiagnosed"] = get_report_setting(KEY_MISDIAGNOSED) or None
-                report_text = str(result._result.report(**kwargs))
-                report_path = result.result_path / "results.txt"
-                report_path.write_text(report_text, encoding="utf-8")
-            except Exception:
-                pass  # Non-critical — don't fail the save
-
-            # Generate PCA sweep plot for PCA+OLS results
-            try:
-                if hasattr(result._result, "plot_sweep") and result._result.sweep_result is not None:
-                    sweep_path = result.result_path / "sweep_plot.png"
-                    result._result.plot_sweep(path=str(sweep_path))
-            except Exception:
-                pass  # Non-critical — don't fail the save
-
-            # Generate replication script from config snapshot
-            try:
-                script = result.to_replication_script()
-                script_path = result.result_path / "replication_script.py"
-                script_path.write_text(script, encoding="utf-8")
-            except Exception:
-                pass  # Non-critical — don't fail the save
+        """Save the library result object + artifacts driven by SaveConfig."""
+        if result._result is None:
+            return
+        from .result_export import export_result
+        from .save_config import SaveConfig
+        from .settings import app_settings
+        cfg = SaveConfig.from_settings(app_settings())
+        export_result(result, result.result_path, cfg)
 
     @staticmethod
     def load_result(project_path: Path, result_id: str) -> Result:

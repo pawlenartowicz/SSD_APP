@@ -165,8 +165,8 @@ class SnippetsTab:
         return rows
 
     def _display(self, snippets: list[dict]) -> None:
-        from ....utils.report_settings import get_report_setting, KEY_SNIPPET_PREVIEW
-        cap = get_report_setting(KEY_SNIPPET_PREVIEW)
+        from ....utils import display_limits
+        cap = display_limits.SNIPPET_PREVIEW
 
         limit = min(len(snippets), 500)
         table = self._table

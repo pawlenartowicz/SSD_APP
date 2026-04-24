@@ -1,10 +1,11 @@
 """Shared test configuration.
 
-Handles the fact that PySide6 is not installed in the test venv by
-stubbing out the Qt-dependent modules before any ssdiff_gui imports.
+Real PySide6 is installed in the test venv. We just need a headless
+QApplication so QPainter/QPixmap operations (used by the sweep-plot
+exporter) work without a display.
 """
 
-import sys
+import os
 from pathlib import Path
 from datetime import datetime
 from unittest.mock import MagicMock
@@ -12,32 +13,26 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-# ── Stub PySide6 so ssdiff_gui imports don't crash ──────────────────
-# Only the module-level imports matter; we never call Qt in these tests.
-_QT_MODULES = [
-    "PySide6",
-    "PySide6.QtCore",
-    "PySide6.QtWidgets",
-    "PySide6.QtGui",
-    "PySide6.QtCharts",
-]
+# Headless Qt — must be set before any QApplication is created.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-for mod_name in _QT_MODULES:
-    if mod_name not in sys.modules:
-        mock = MagicMock()
-        # QThread needs to be a class so it can be subclassed
-        if mod_name == "PySide6.QtCore":
-            mock.QThread = type("QThread", (), {})
-            mock.Signal = MagicMock(return_value=MagicMock())
-            mock.QSettings = MagicMock()
-        # Qt widget base classes must be real types so they can be subclassed
-        if mod_name == "PySide6.QtWidgets":
-            for _qt_cls in (
-                "QWidget", "QFrame", "QDialog", "QLabel",
-                "QMainWindow", "QStyledItemDelegate",
-            ):
-                setattr(mock, _qt_cls, type(_qt_cls, (), {}))
-        sys.modules[mod_name] = mock
+
+@pytest.fixture(scope="session", autouse=True)
+def _qt_app():
+    """Headless QApplication + isolated QSettings.
+
+    QStandardPaths test mode reroutes QSettings to ``~/.qttest/`` so tests
+    never touch the developer's real config (which would otherwise leak
+    e.g. the configured embeddings directory into file-listing tests).
+    """
+    from PySide6.QtCore import QSettings, QStandardPaths
+    QStandardPaths.setTestModeEnabled(True)
+
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+
+    QSettings("SSD", "SSD").clear()
+    yield app
 
 # ── Ensure ssdiff_gui is importable ─────────────────────────────────
 _APP_ROOT = Path(__file__).resolve().parent.parent

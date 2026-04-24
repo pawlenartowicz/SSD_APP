@@ -605,8 +605,8 @@ You can switch between saved results to compare.</p>
 folder:</p>
 <table>
   <tr><th>File</th><th>Format</th><th>Contents</th></tr>
-  <tr><td>results.txt</td><td>TXT</td>
-      <td>Human-readable report. Contents controlled by Report Settings.</td></tr>
+  <tr><td>report.md</td><td>MD</td>
+      <td>Human-readable report. Format and contents controlled by Save Settings.</td></tr>
   <tr><td>results.pkl</td><td>PKL</td>
       <td>Complete result object (scores, poles, clusters, snippets).
           Load in Python for further analysis.</td></tr>
@@ -619,8 +619,9 @@ folder:</p>
 <p>The replication script hardcodes all parameters and file paths, making it
 easy to share exact methodology with collaborators or re-run the analysis
 outside the GUI.</p>
-<p>Use <b>Report Settings</b> (in the results toolbar) to control which
-sections appear in the <code>results.txt</code> file.</p>"""),
+<p>Use <b>Save Settings</b> (in the results toolbar) to choose which artifacts
+and formats are written. Tabular outputs (words, clusters, snippets, etc.) go
+under <code>tables/</code>.</p>"""),
     ]),
 
     ("analysis-types", "Types of Analysis", None, [
@@ -719,7 +720,7 @@ treatment-talk differs across diagnostic groups.</p>
     20250601_143015/        # One folder per saved result
       config.json
       results.pkl
-      results.txt
+      report.md
       replication_script.py</pre>"""),
 
         ("proj-save", "Saving", """

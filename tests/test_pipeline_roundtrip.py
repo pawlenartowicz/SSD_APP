@@ -4,9 +4,24 @@ Skipped if spaCy / en_core_web_sm cannot be loaded (auto-install attempted by co
 """
 
 from datetime import datetime
+from unittest.mock import patch
 
 import numpy as np
 import pytest
+
+
+class FakeSettings:
+    def __init__(self, initial=None):
+        self._store = dict(initial or {})
+
+    def value(self, key, default=None):
+        return self._store.get(key, default)
+
+    def setValue(self, key, value):
+        self._store[key] = value
+
+    def remove(self, key):
+        self._store.pop(key, None)
 
 try:
     import spacy
@@ -130,12 +145,11 @@ def _make_result_wrapper(project, result_id, config_snapshot):
 
 
 class TestSaveArtifacts:
-    """Verify that save_result() produces results.txt and sweep_plot.png."""
+    """Verify that save_result() produces report.md and a replication script."""
 
     def test_pls_results_txt(self, tmp_path, tiny_embeddings, synthetic_corpus):
         from ssdiff import SSD
         from ssdiff_gui.utils.file_io import ProjectIO
-        from unittest.mock import patch
 
         rng = np.random.RandomState(42)
         y = rng.randn(len(synthetic_corpus.docs))
@@ -151,11 +165,11 @@ class TestSaveArtifacts:
         })
         result._result = ssd_result
 
-        with patch("ssdiff_gui.utils.report_settings.get_report_setting", return_value=5):
+        with patch("ssdiff_gui.utils.settings.app_settings", return_value=FakeSettings()):
             ProjectIO.save_result(result)
 
-        report_path = result.result_path / "results.txt"
-        assert report_path.exists(), "results.txt not generated"
+        report_path = result.result_path / "report.md"
+        assert report_path.exists(), "report.md not generated"
         content = report_path.read_text(encoding="utf-8")
         assert "Please cite as:" in content
         assert "Plisiecki" in content
@@ -164,7 +178,6 @@ class TestSaveArtifacts:
     def test_groups_results_txt(self, tmp_path, tiny_embeddings, synthetic_corpus):
         from ssdiff import SSD
         from ssdiff_gui.utils.file_io import ProjectIO
-        from unittest.mock import patch
 
         n = len(synthetic_corpus.docs)
         groups = ["A"] * (n // 2) + ["B"] * (n - n // 2)
@@ -180,11 +193,11 @@ class TestSaveArtifacts:
         })
         result._result = ssd_result
 
-        with patch("ssdiff_gui.utils.report_settings.get_report_setting", return_value=5):
+        with patch("ssdiff_gui.utils.settings.app_settings", return_value=FakeSettings()):
             ProjectIO.save_result(result)
 
-        report_path = result.result_path / "results.txt"
-        assert report_path.exists(), "results.txt not generated for group result"
+        report_path = result.result_path / "report.md"
+        assert report_path.exists(), "report.md not generated for group result"
         content = report_path.read_text(encoding="utf-8")
         assert "Please cite as:" in content
         assert "Plisiecki" in content
@@ -192,7 +205,6 @@ class TestSaveArtifacts:
     def test_pcaols_results_txt(self, tmp_path, tiny_embeddings, synthetic_corpus):
         from ssdiff import SSD
         from ssdiff_gui.utils.file_io import ProjectIO
-        from unittest.mock import patch
 
         rng = np.random.RandomState(42)
         y = rng.randn(len(synthetic_corpus.docs))
@@ -208,11 +220,11 @@ class TestSaveArtifacts:
         })
         result._result = ssd_result
 
-        with patch("ssdiff_gui.utils.report_settings.get_report_setting", return_value=5):
+        with patch("ssdiff_gui.utils.settings.app_settings", return_value=FakeSettings()):
             ProjectIO.save_result(result)
 
-        report_path = result.result_path / "results.txt"
-        assert report_path.exists(), "results.txt not generated for PCA+OLS result"
+        report_path = result.result_path / "report.md"
+        assert report_path.exists(), "report.md not generated for PCA+OLS result"
         content = report_path.read_text(encoding="utf-8")
         assert "Please cite as:" in content
         assert "Plisiecki" in content
@@ -220,8 +232,10 @@ class TestSaveArtifacts:
 
     def test_pcaols_sweep_png(self, tmp_path, tiny_embeddings, synthetic_corpus):
         from ssdiff import SSD
-        from ssdiff_gui.utils.file_io import ProjectIO
-        from unittest.mock import patch, MagicMock
+        from ssdiff_gui.utils.result_export import export_result
+        from ssdiff_gui.utils.save_config import ItemConfig, SaveConfig
+        from dataclasses import replace
+        from unittest.mock import MagicMock, patch
 
         rng = np.random.RandomState(42)
         y = rng.randn(len(synthetic_corpus.docs))
@@ -230,31 +244,35 @@ class TestSaveArtifacts:
         ssd = SSD(tiny_embeddings, synthetic_corpus, y, lexicon, window=3)
         ssd_result = ssd.fit_ols(fixed_k=5)
 
-        # First pickle the real result (sweep_result=None is fine)
         project = _make_project(tmp_path)
-        ProjectIO.create_project_structure(project.project_path)
         result = _make_result_wrapper(project, "20260414_sweep", {
             "analysis_type": "pca_ols",
         })
         result._result = ssd_result
 
-        # Now attach mock sweep so save_result's PNG branch fires.
-        # Patch pickle.dump to avoid re-serialising the unpicklable mock.
+        # Attach mock sweep so the sweep_plot branch fires.
+        # Patch pickle.dump in result_export to avoid serialising the unpicklable mock,
+        # and patch render_sweep_plot so we don't need real sweep_result data here.
         ssd_result.sweep_result = MagicMock()
-        mock_plot = MagicMock(return_value=b"\x89PNG fake")
-        ssd_result.plot_sweep = mock_plot
 
-        with patch("ssdiff_gui.utils.file_io.pickle.dump"), \
-             patch("ssdiff_gui.utils.report_settings.get_report_setting", return_value=5):
-            ProjectIO.save_result(result)
+        cfg = replace(
+            SaveConfig.default(),
+            items={**SaveConfig.default().items, "sweep_plot": ItemConfig(enabled=True)},
+        )
+        fake_pixmap = MagicMock()
+        with patch("ssdiff_gui.utils.result_export.pickle.dump"), \
+             patch("ssdiff_gui.utils.charts.render_sweep_plot", return_value=fake_pixmap) as mock_render:
+            export_result(result, result.result_path, cfg)
 
-        expected_path = str(result.result_path / "sweep_plot.png")
-        mock_plot.assert_called_once_with(path=expected_path)
+        expected_path = str(result.result_path / "tables" / "sweep_plot.png")
+        mock_render.assert_called_once_with(
+            ssd_result.sweep_result.df_joined, ssd_result.sweep_result.best_k,
+        )
+        fake_pixmap.save.assert_called_once_with(expected_path, "PNG")
 
     def test_no_sweep_png_for_pls(self, tmp_path, tiny_embeddings, synthetic_corpus):
         from ssdiff import SSD
         from ssdiff_gui.utils.file_io import ProjectIO
-        from unittest.mock import patch
 
         rng = np.random.RandomState(42)
         y = rng.randn(len(synthetic_corpus.docs))
@@ -270,7 +288,7 @@ class TestSaveArtifacts:
         })
         result._result = ssd_result
 
-        with patch("ssdiff_gui.utils.report_settings.get_report_setting", return_value=5):
+        with patch("ssdiff_gui.utils.settings.app_settings", return_value=FakeSettings()):
             ProjectIO.save_result(result)
 
         sweep_path = result.result_path / "sweep_plot.png"
@@ -279,7 +297,6 @@ class TestSaveArtifacts:
     def test_no_sweep_png_for_explicit_k(self, tmp_path, tiny_embeddings, synthetic_corpus):
         from ssdiff import SSD
         from ssdiff_gui.utils.file_io import ProjectIO
-        from unittest.mock import patch
 
         rng = np.random.RandomState(42)
         y = rng.randn(len(synthetic_corpus.docs))
@@ -296,7 +313,7 @@ class TestSaveArtifacts:
         })
         result._result = ssd_result
 
-        with patch("ssdiff_gui.utils.report_settings.get_report_setting", return_value=5):
+        with patch("ssdiff_gui.utils.settings.app_settings", return_value=FakeSettings()):
             ProjectIO.save_result(result)
 
         sweep_path = result.result_path / "sweep_plot.png"
@@ -324,7 +341,8 @@ class TestPipelineRoundtrip:
         result._result = ssd_result
 
         ProjectIO.save_result_config(result)
-        ProjectIO.save_result(result)
+        with patch("ssdiff_gui.utils.settings.app_settings", return_value=FakeSettings()):
+            ProjectIO.save_result(result)
 
         from ssdiff import PLSResult
 
@@ -355,7 +373,8 @@ class TestPipelineRoundtrip:
         result._result = ssd_result
 
         ProjectIO.save_result_config(result)
-        ProjectIO.save_result(result)
+        with patch("ssdiff_gui.utils.settings.app_settings", return_value=FakeSettings()):
+            ProjectIO.save_result(result)
 
         from ssdiff import PCAOLSResult
 
@@ -385,7 +404,8 @@ class TestPipelineRoundtrip:
         result._result = ssd_result
 
         ProjectIO.save_result_config(result)
-        ProjectIO.save_result(result)
+        with patch("ssdiff_gui.utils.settings.app_settings", return_value=FakeSettings()):
+            ProjectIO.save_result(result)
 
         from ssdiff import GroupResult
 
@@ -426,7 +446,8 @@ class TestPipelineRoundtrip:
         })
         result._result = ssd_result
 
-        ProjectIO.save_result(result)
+        with patch("ssdiff_gui.utils.settings.app_settings", return_value=FakeSettings()):
+            ProjectIO.save_result(result)
 
         script_path = result.result_path / "replication_script.py"
         assert script_path.exists()
