@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from ssdiff import GroupResult, PCAOLSResult, PLSResult
+from ssdiff.results.multi_pls_result import MultiPLSResult
 
 from .. import html_helpers
 
@@ -69,6 +70,8 @@ def _common_header_html(view, p) -> list[str]:
         atype_label = "PCA+OLS"
     elif isinstance(res, GroupResult):
         atype_label = "Group Comparison"
+    elif isinstance(res, MultiPLSResult):
+        atype_label = "MultiPLS"
     else:
         atype_label = type(res).__name__
 
@@ -236,37 +239,19 @@ def _run_config_html(view, p) -> list[str]:
     )
 
     if atype == "pls":
-        _pls_n_comp = s.get("pls_n_components", 0)
-        n_comp_display = "auto" if _pls_n_comp == 0 else _pls_n_comp
+        k_val = s.get("pls_k", s.get("pls_n_components", "—"))
         html.append(
-            f'<tr><td style="{label_style}">PLS Components</td>'
-            f'<td style="{value_style}">{n_comp_display}</td></tr>'
+            f'<tr><td style="{label_style}">k:</td>'
+            f'<td style="{value_style}">{k_val}</td></tr>'
         )
-        _pls_p_method = s.get("pls_p_method", "auto")
         html.append(
-            f'<tr><td style="{label_style}">p-value Method</td>'
-            f'<td style="{value_style}">{_pls_p_method}</td></tr>'
+            f'<tr><td style="{label_style}">k max (auto):</td>'
+            f'<td style="{value_style}">{s.get("pls_k_max", "—")}</td></tr>'
         )
-        if _pls_p_method in ("perm", "auto"):
-            html.append(
-                f'<tr><td style="{label_style}">n Permutations</td>'
-                f'<td style="{value_style}">{s.get("pls_n_perm", 1000):,}</td></tr>'
-            )
-        if _pls_p_method in ("split", "split_cal", "auto"):
-            from ssdiff_gui.models.project import Project
-            html.append(
-                f'<tr><td style="{label_style}">n Splits</td>'
-                f'<td style="{value_style}">{s.get("pls_n_splits", Project.__dataclass_fields__["pls_n_splits"].default)}</td></tr>'
-            )
-            html.append(
-                f'<tr><td style="{label_style}">Split Ratio</td>'
-                f'<td style="{value_style}">{s.get("pls_split_ratio", 0.5)}</td></tr>'
-            )
-        if s.get("pls_pca_preprocess") is not None:
-            html.append(
-                f'<tr><td style="{label_style}">PCA Preprocess</td>'
-                f'<td style="{value_style}">{s.get("pls_pca_preprocess")}</td></tr>'
-            )
+        html.append(
+            f'<tr><td style="{label_style}">n_splits (split_nb):</td>'
+            f'<td style="{value_style}">{s.get("pls_n_splits", "—")}</td></tr>'
+        )
         html.append(
             f'<tr><td style="{label_style}">Random State</td>'
             f'<td style="{value_style}">{s.get("pls_random_state", 42)}</td></tr>'
@@ -307,6 +292,35 @@ def _run_config_html(view, p) -> list[str]:
         html.append(
             f'<tr><td style="{label_style}">Random State</td>'
             f'<td style="{value_style}">{s.get("groups_random_state", 42)}</td></tr>'
+        )
+
+    elif atype == "multipls":
+        mp_k = s.get("multipls_k", "auto")
+        html.append(
+            f'<tr><td style="{label_style}">k (rotated dims):</td>'
+            f'<td style="{value_style}">{mp_k}</td></tr>'
+        )
+        html.append(
+            f'<tr><td style="{label_style}">k max (auto):</td>'
+            f'<td style="{value_style}">{s.get("multipls_k_max", "—")}</td></tr>'
+        )
+        html.append(
+            f'<tr><td style="{label_style}">Rotation</td>'
+            f'<td style="{value_style}">{s.get("multipls_rotate", "varimax")}</td></tr>'
+        )
+        rv = s.get("multipls_rotation_vocab", None)
+        rv_text = "full vocab" if rv is None else f"{int(rv):,}"
+        html.append(
+            f'<tr><td style="{label_style}">Rotation vocab</td>'
+            f'<td style="{value_style}">{rv_text}</td></tr>'
+        )
+        html.append(
+            f'<tr><td style="{label_style}">n_splits (split_nb):</td>'
+            f'<td style="{value_style}">{s.get("multipls_n_splits", "—")}</td></tr>'
+        )
+        html.append(
+            f'<tr><td style="{label_style}">Random State</td>'
+            f'<td style="{value_style}">{s.get("multipls_random_state", "default")}</td></tr>'
         )
 
     html.append("</table>")
@@ -398,11 +412,6 @@ def _pls_fit_html(view, p) -> list[str]:
         f'<tr><td style="{label_style}">Components</td>'
         f'<td style="{value_style}">{res.n_components}</td></tr>'
     )
-    if res.fit_info and res.fit_info.p_method:
-        html.append(
-            f'<tr><td style="{label_style}">p-value Method</td>'
-            f'<td style="{value_style}">{res.fit_info.p_method}</td></tr>'
-        )
     html.append("</table>")
     return html
 
@@ -473,9 +482,79 @@ def _pca_ols_fit_html(view, p) -> list[str]:
     html.append('<table cellspacing="6" style="width: 100%;">')
     html.append(
         f'<tr><td style="{label_style}">Components (K)</td>'
-        f'<td style="{value_style}">{res.n_components}</td></tr>'
+        f'<td style="{value_style}">{res.pca_k}</td></tr>'
     )
     html.append("</table>")
+    return html
+
+
+def _multipls_fit_html(view, p) -> list[str]:
+    """Model Fit, MultiPLS axis summary, and per-dim p-value table for MultiPLSResult."""
+    label_style, value_style, section_style = _styles(p)
+    res = view.source
+
+    html: list[str] = []
+
+    s = res.stats
+    html.append(f'<div style="{section_style}">Model Fit</div>')
+    html.append('<table cellspacing="6" style="width: 100%;">')
+    html.append(
+        f'<tr><td style="{label_style}">R²</td>'
+        f'<td style="{value_style}">{s.r2:.4f}</td></tr>'
+    )
+    pval = s.pvalue
+    pval_str = f"{pval:.2e}" if pval is not None and pval < 0.001 else (
+        f"{pval:.4f}" if pval is not None else "—"
+    )
+    html.append(
+        f'<tr><td style="{label_style}">Container p-value</td>'
+        f'<td style="{value_style}">{pval_str}</td></tr>'
+    )
+    html.append(
+        f'<tr><td style="{label_style}">Documents</td>'
+        f'<td style="{value_style}">{s.n:,}</td></tr>'
+    )
+    html.append("</table>")
+
+    rot_vocab = res._rotation_meta.get("rotation_vocab", None)
+    html.append(f'<div style="{section_style}">MultiPLS</div>')
+    html.append('<table cellspacing="6" style="width: 100%;">')
+    html.append(
+        f'<tr><td style="{label_style}">Components</td>'
+        f'<td style="{value_style}">{res.n_components}</td></tr>'
+    )
+    html.append(
+        f'<tr><td style="{label_style}">Rotation</td>'
+        f'<td style="{value_style}">{s.rotate}</td></tr>'
+    )
+    if rot_vocab is None:
+        rv_text = "full vocab"
+    else:
+        rv_text = f"{int(rot_vocab):,}"
+    html.append(
+        f'<tr><td style="{label_style}">Rotation vocab</td>'
+        f'<td style="{value_style}">{rv_text}</td></tr>'
+    )
+    html.append("</table>")
+
+    per_dim = np.asarray(res.per_dim_pvalues, dtype=float)
+    if per_dim.size > 0:
+        leaf_keys = [k for k in res._leaves.keys() if k != "combined"]
+        html.append(f'<div style="{section_style}">Per-dim p-values</div>')
+        html.append(
+            '<table cellspacing="4" style="width: 100%; font-size: 12px;">'
+            f'<tr style="{label_style}"><td>Dim</td><td>p-value</td></tr>'
+        )
+        for key, pv in zip(leaf_keys, per_dim):
+            if not np.isfinite(pv):
+                p_text = "—"
+            else:
+                p_text = f"{pv:.2e}" if pv < 0.001 else f"{pv:.4f}"
+            html.append(
+                f'<tr><td>{key}</td><td>{p_text}</td></tr>'
+            )
+        html.append("</table>")
+
     return html
 
 
@@ -738,6 +817,8 @@ class DetailsTab:
             result_html += _pls_fit_html(view, p)
         elif view.analysis_type == "pca_ols":
             result_html += _pca_ols_fit_html(view, p)
+        elif view.analysis_type == "multipls":
+            result_html += _multipls_fit_html(view, p)
         else:
             result_html += _group_fit_html(view, p)
             if is_fulldoc:

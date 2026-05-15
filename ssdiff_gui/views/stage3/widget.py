@@ -27,6 +27,7 @@ from PySide6.QtCore import Qt, Signal, QEvent, QTimer
 import numpy as np
 
 from ssdiff import PLSResult, PCAOLSResult, GroupResult
+from ssdiff.results.multi_pls_result import MultiPLSResult
 
 from .result_view import ResultView
 from . import stats_strip, labels, pair_selector, html_helpers
@@ -165,6 +166,7 @@ class Stage3Widget(QWidget):
         self.current_result: Optional[Result] = None
         self._current_snippets: List[Dict] = []
         self._current_pair_key: Optional[Tuple[str, str]] = None
+        self._current_leaf_key: Optional[str] = None
         self._view: ResultView | None = None
 
         # Pair-selector widgets (one per pair-scoped tab — Cluster Overview,
@@ -608,14 +610,20 @@ class Stage3Widget(QWidget):
         ssd_result = result._result
 
         initial_pair = None
+        initial_leaf = None
         if isinstance(ssd_result, GroupResult) and ssd_result.pairs:
             group_labels = getattr(ssd_result, "group_labels", None) or {}
             first = ssd_result.pairs[0]
             g1 = group_labels.get(first.g1, first.g1)
             g2 = group_labels.get(first.g2, first.g2)
             initial_pair = (g1, g2)
+        elif isinstance(ssd_result, MultiPLSResult):
+            initial_leaf = list(ssd_result._leaves.keys())[0]
         self._current_pair_key = initial_pair
-        self._view = ResultView.build(ssd_result, current_pair=initial_pair, meta=result)
+        self._current_leaf_key = initial_leaf
+        self._view = ResultView.build(
+            ssd_result, current_pair=initial_pair, current_leaf=initial_leaf, meta=result,
+        )
 
         # Re-attach shared project embeddings if missing (stripped during save)
         if getattr(ssd_result, "embeddings", None) is None and self.project._emb is not None:
@@ -632,6 +640,8 @@ class Stage3Widget(QWidget):
             badge_text, fg_color, bg_color = "PCA+OLS", p.success, p.success_bg
         elif isinstance(ssd_result, GroupResult):
             badge_text, fg_color, bg_color = "Groups", p.warning, p.warning_bg
+        elif isinstance(ssd_result, MultiPLSResult):
+            badge_text, fg_color, bg_color = "MultiPLS", p.accent, p.accent_muted
         else:
             badge_text, fg_color, bg_color = "?", p.text_secondary, p.bg_elevated
         self._analysis_badge.setText(badge_text)
@@ -685,19 +695,32 @@ class Stage3Widget(QWidget):
         self._overlay_tabs.stop()
 
     def _on_pair_changed(self, index: int):
-        """Handle pair selection change from any per-tab combo; sync all combos."""
-        if index < 0 or self._view is None or not self._view.is_multi_pair:
+        """Handle pair / leaf selection change from any per-tab combo; sync all combos."""
+        if index < 0 or self._view is None:
+            return
+        if not (self._view.is_multi_pair or self._view.is_multi_leaf):
             return
         sender = self.sender()
-        pair_key = sender.itemData(index) if sender is not None else None
-        if pair_key is None:
-            return
-        pair_key = tuple(pair_key)
-        if pair_key not in self._view.pairs:
+        raw_key = sender.itemData(index) if sender is not None else None
+        if raw_key is None:
             return
 
-        self._current_pair_key = pair_key
-        self._view = ResultView.build(self._view.source, current_pair=pair_key, meta=self._view.meta)
+        if self._view.is_multi_leaf:
+            leaf_key = str(raw_key)
+            if leaf_key not in self._view.leaves:
+                return
+            self._current_leaf_key = leaf_key
+            self._view = ResultView.build(
+                self._view.source, current_leaf=leaf_key, meta=self._view.meta,
+            )
+        else:
+            pair_key = tuple(raw_key)
+            if pair_key not in self._view.pairs:
+                return
+            self._current_pair_key = pair_key
+            self._view = ResultView.build(
+                self._view.source, current_pair=pair_key, meta=self._view.meta,
+            )
 
         for combo in self._pair_combos:
             if combo is sender:
@@ -707,7 +730,10 @@ class Stage3Widget(QWidget):
             combo.blockSignals(False)
 
         stats_strip.apply(self._stat_card_widgets, self._view)
-        labels.apply_group_labels(self._view, self._label_widgets)
+        if self._view.is_group:
+            labels.apply_group_labels(self._view, self._label_widgets)
+        else:
+            labels.apply_continuous_labels(self._label_widgets)
 
         self._overlay_tabs.start()
         QApplication.processEvents()

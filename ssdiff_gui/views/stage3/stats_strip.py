@@ -11,6 +11,8 @@ _LABEL_SETS: dict[tuple[str, bool], list[str]] = {
     ("pca_ols", True):  ["R²", "Adj. R²", "p", "‖β‖", "Docs", "Selected K", "Corr(y, ŷ)"],
     ("groups", False): ["p", "Cohen's d", "‖Contrast‖", "Permutations", "Docs", "n(g1)", "n(g2)"],
     ("groups", True):  ["Omnibus p", "p(corrected)", "Cohen's d", "‖Contrast‖", "Docs", "n(g1)", "n(g2)"],
+    ("multipls", False): ["R²", "p", "‖β‖", "Δy / +0.10 cos", "Docs", "IQR Effect", "Corr(y, ŷ)"],
+    ("multipls", True):  ["R²", "p", "‖β‖", "Δy / +0.10 cos", "Docs", "IQR Effect", "Corr(y, ŷ)"],
 }
 
 
@@ -125,6 +127,22 @@ def _groups_multi_values(view) -> list[str]:
     ]
 
 
+def _multipls_values(view) -> list[str]:
+    src = view.source
+    s = src.stats
+    leaf = view.working
+    leaf_p = getattr(leaf, "pvalue", None)
+    return [
+        _fmt_float(getattr(s, "r2", None), 4),
+        _fmt_p(leaf_p if leaf_p is not None else getattr(s, "pvalue", None)),
+        "—",
+        "—",
+        _fmt_int(getattr(s, "n", None)),
+        "—",
+        "—",
+    ]
+
+
 def _fill_values(view, labels) -> list[dict]:
     at = view.analysis_type
     multi = view.is_multi_pair
@@ -137,6 +155,8 @@ def _fill_values(view, labels) -> list[dict]:
         values = _groups_single_values(view)
     elif at == "groups" and multi:
         values = _groups_multi_values(view)
+    elif at == "multipls":
+        values = _multipls_values(view)
     else:
         values = ["—"] * len(labels)
 

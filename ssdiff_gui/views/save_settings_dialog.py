@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from ssdiff import GroupResult, PCAOLSResult, PLSResult
 from ssdiff.results.display import NARRATIVE_EXTS, TABULAR_EXTS
+from ssdiff.results.multi_pls_result import MultiPLSResult
 
 from ..utils.artifact_registry import get_columns
 from ..utils.save_config import DEFAULT_ITEM_KEYS, ItemConfig, SaveConfig
@@ -30,7 +31,7 @@ _ROW_SPEC: tuple[tuple[str, str, tuple[type, ...] | None], ...] = (
     ("Snippets",                         "snippets",         None),
     ("Extreme docs (pos + neg)",         "docs_extreme",     (PLSResult, PCAOLSResult)),
     ("Misdiagnosed docs",                "docs_misdiagnosed", (PLSResult, PCAOLSResult)),
-    ("Pairs list",                       "pairs",            (GroupResult,)),
+    ("Pairs list",                       "pairs",            (GroupResult, MultiPLSResult)),
 )
 
 # Keys for rows that are plain checkboxes only — no column/row controls.

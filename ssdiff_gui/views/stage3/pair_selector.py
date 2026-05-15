@@ -30,32 +30,49 @@ def make_pair_selector(
     return frame
 
 
-def populate_pair_combos(view, combos: List[QComboBox], frames: List[QWidget]) -> None:
-    """Populate all synchronized pair combos from a ResultView.
+def _pair_label(key: tuple[str, str]) -> str:
+    g1, g2 = key
+    return f"{g1} vs {g2}"
 
-    For non-group views (pls, pca_ols), hides every frame.
-    For group views, fills each combo with one item per pair (text + userData tuple),
-    then shows the frames only when multiple pairs exist.
+
+def _leaf_label(key: str) -> str:
+    if key == "combined":
+        return "Combined β"
+    if key.startswith("dim-"):
+        return f"Dim {key.split('-', 1)[1]}"
+    return key
+
+
+def populate_pair_combos(view, combos: List[QComboBox], frames: List[QWidget]) -> None:
+    """Populate all synchronized pair / leaf combos from a ResultView.
+
+    For pls / pca_ols views, hides every frame.
+    For group views, fills each combo with one item per pair (text + userData tuple).
+    For multipls views, fills each combo with one item per leaf key (text + userData str).
+    Frames are shown only when there are multiple pairs or multiple leaves.
     """
-    if not view.is_group or not view.pairs:
+    is_group = view.is_group and bool(view.pairs)
+    is_multipls = view.analysis_type == "multipls" and bool(view.leaves)
+    if not (is_group or is_multipls):
         for frame in frames:
             frame.hide()
         return
 
-    items = []
-    for key in view.pairs:
-        g1, g2 = key
-        text = f"{g1} vs {g2}"
-        items.append((text, key))
+    if is_group:
+        items = [(_pair_label(key), key) for key in view.pairs]
+        current = view.current_pair
+    else:
+        items = [(_leaf_label(key), key) for key in view.leaves]
+        current = view.current_leaf
 
     for combo in combos:
         combo.blockSignals(True)
         combo.clear()
         for text, key in items:
             combo.addItem(text, userData=key)
-        if view.current_pair is not None:
+        if current is not None:
             for i, (_, key) in enumerate(items):
-                if key == view.current_pair:
+                if key == current:
                     combo.setCurrentIndex(i)
                     break
             else:
@@ -64,6 +81,6 @@ def populate_pair_combos(view, combos: List[QComboBox], frames: List[QWidget]) -
             combo.setCurrentIndex(0)
         combo.blockSignals(False)
 
-    show_selectors = view.is_multi_pair
+    show_selectors = view.is_multi_pair or view.is_multi_leaf
     for frame in frames:
         frame.setVisible(show_selectors)

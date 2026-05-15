@@ -96,6 +96,28 @@ class SettingsDialog(QDialog):
         autoload_group.setLayout(autoload_layout)
         layout.addWidget(autoload_group)
 
+        # --- Performance ---
+        perf_group = QGroupBox("Performance")
+        perf_layout = QVBoxLayout()
+        self._ram_efficient_check = QCheckBox(
+            "Low-RAM mode (load only top-50k vocab + corpus tokens)"
+        )
+        self._ram_efficient_check.setChecked(
+            _qsetting_bool(self._settings.value("performance/ram_efficient", False), default=False)
+        )
+        perf_desc = QLabel(
+            "Loads pre-prepared <code>.ssdembed</code> files in mmap mode. "
+            "Disables the <b>Prepare Embeddings</b> step "
+            "(partial embeddings can't be normalised or saved). "
+            "Requires preprocessing complete before loading the embedding."
+        )
+        perf_desc.setObjectName("label_muted")
+        perf_desc.setWordWrap(True)
+        perf_layout.addWidget(self._ram_efficient_check)
+        perf_layout.addWidget(perf_desc)
+        perf_group.setLayout(perf_layout)
+        layout.addWidget(perf_group)
+
         # --- Embeddings location ---
         loc_group = QGroupBox("Embeddings Location")
         loc_layout = QVBoxLayout()
@@ -204,6 +226,10 @@ class SettingsDialog(QDialog):
     def _save(self):
         self._settings.setValue(_KEY_PROJECTS_DIR, self._dir_edit.text())
         self._settings.setValue(_KEY_AUTOLOAD, self._autoload_check.isChecked())
+        self._settings.setValue(
+            "performance/ram_efficient",
+            self._ram_efficient_check.isChecked(),
+        )
         self._settings.setValue(
             _KEY_EMB_MODE,
             "custom" if self._loc_custom_radio.isChecked() else "shared",

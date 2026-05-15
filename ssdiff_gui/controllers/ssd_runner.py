@@ -76,6 +76,8 @@ class SSDRunner(QThread):
                 self._run_pca_ols(result)
             elif atype == "groups":
                 self._run_groups(result)
+            elif atype == "multipls":
+                self._run_multipls(result)
             else:
                 raise ValueError(f"Unknown analysis_type: {atype!r}")
 
@@ -255,21 +257,17 @@ class SSDRunner(QThread):
             return
 
         # Resolve parameters
-        n_comp = p.pls_n_components if p.pls_n_components != 0 else "auto"
-        p_method = p.pls_p_method if p.pls_p_method != "none" else None
+        k = p.pls_k  # int or "auto"
         random_state = self._resolve_random_state(p.pls_random_state)
 
-        self.progress.emit(15, f"Fitting PLS (n_comp={n_comp}, p_method={p_method})...")
+        self.progress.emit(15, f"Fitting PLS (k={k!r}, split_nb test)...")
 
         cb = make_progress_cb(self.progress, 15, 55, "Fitting PLS")
         with progress_hook(cb):
             ssd_result = ssd.fit_pls(
-                n_components=n_comp,
-                pca_preprocess=p.pls_pca_preprocess,
-                p_method=p_method,
-                n_perm=p.pls_n_perm,
+                k=k,
+                k_max=p.pls_k_max,
                 n_splits=p.pls_n_splits,
-                split_ratio=p.pls_split_ratio,
                 random_state=random_state,
             )
 
@@ -389,6 +387,57 @@ class SSDRunner(QThread):
             return
 
         self.progress.emit(85, "Finalizing...")
+        self._finalize_result(result, ssd_result,
+                              cov_summary=cov_summary, cov_per_token=cov_per_token)
+
+    # ------------------------------------------------------------------ #
+    #  MultiPLS pipeline
+    # ------------------------------------------------------------------ #
+
+    def _run_multipls(self, result: Result):
+        _ensure_streams()
+        from ssdiff import progress_hook
+        from ..utils.progress import make_progress_cb
+        p = self.project
+
+        self.progress.emit(5, "Building SSD model...")
+        ssd, pre_docs = self._build_ssd()
+
+        if self._is_cancelled:
+            return
+
+        self.progress.emit(10, "Computing lexicon coverage...")
+        cov_summary, cov_per_token = self._compute_coverage()
+
+        if self._is_cancelled:
+            return
+
+        k = p.multipls_k
+        random_state = self._resolve_random_state(p.multipls_random_state)
+
+        self.progress.emit(15, f"Fitting MultiPLS (k={k!r}, rotate={p.multipls_rotate!r})...")
+
+        cb = make_progress_cb(self.progress, 15, 60, "Fitting MultiPLS")
+        with progress_hook(cb):
+            ssd_result = ssd.fit_multipls(
+                k=k,
+                k_max=p.multipls_k_max,
+                rotate=p.multipls_rotate,
+                rotation_vocab=p.multipls_rotation_vocab,
+                n_splits=p.multipls_n_splits,
+                random_state=random_state,
+            )
+
+        if self._is_cancelled:
+            return
+
+        self.progress.emit(65, "Caching interpretation data...")
+        self._cache_interpretation(ssd_result, pre_docs, p)
+
+        if self._is_cancelled:
+            return
+
+        self.progress.emit(90, "Finalizing...")
         self._finalize_result(result, ssd_result,
                               cov_summary=cov_summary, cov_per_token=cov_per_token)
 

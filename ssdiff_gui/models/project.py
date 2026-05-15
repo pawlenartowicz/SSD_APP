@@ -5,16 +5,22 @@ and Result (config snapshot + results reference).
 """
 
 from dataclasses import dataclass, field
-from inspect import signature
 from pathlib import Path
 from typing import Optional, List, Any, Tuple
 from datetime import datetime
 
-from ssdiff import SSD
+from ssdiff import SSD  # noqa: F401  (still needed for type hints elsewhere)
 
-_PLS    = signature(SSD.fit_pls).parameters
-_PCAOLS = signature(SSD.fit_ols).parameters
-_GROUPS = signature(SSD.fit_groups).parameters
+# SSDLite v1.0 fit_pls / fit_ols / fit_groups defaults — pinned, not introspected.
+# fit_pls signature changed in 2026-04: n_components→k, p_method/n_perm/split_ratio removed.
+_PLS_K_DEFAULT = "auto"
+_PLS_K_MAX_DEFAULT = 5
+_PLS_N_SPLITS_DEFAULT = 50
+_PCAOLS_K_MIN_DEFAULT = 2
+_PCAOLS_K_MAX_DEFAULT = 120
+_PCAOLS_K_STEP_DEFAULT = 2
+_GROUPS_N_PERM_DEFAULT = 5000
+_GROUPS_CORRECTION_DEFAULT = "holm"
 
 DEFAULT_RANDOM_SEED = 2137
 
@@ -85,9 +91,20 @@ class Result:
             f'encoding="{s.get("csv_encoding", "utf-8-sig")}")',
             f'corpus = Corpus.from_dataframe(df, text_column="{s.get("text_column", "text")}", '
             f'language="{s.get("language", "en")}")',
-            f'emb = Embeddings.load("{s.get("selected_embedding", "embeddings.ssdembed")}")',
-            "",
         ]
+
+        ram_eff = s.get("ram_efficient", False)
+        if ram_eff:
+            lines.append(
+                f'emb = Embeddings.load("{s.get("selected_embedding", "embeddings.ssdembed")}", '
+                'ram_efficient=True)'
+            )
+            lines.append("emb.attach_corpus(corpus)")
+        else:
+            lines.append(
+                f'emb = Embeddings.load("{s.get("selected_embedding", "embeddings.ssdembed")}")'
+            )
+        lines.append("")
 
         # Lexicon
         lexicon = s.get("lexicon_tokens", [])
@@ -100,7 +117,7 @@ class Result:
             lines.append("lexicon = list(set(t for doc in corpus.docs for t in doc))")
 
         # Outcome / groups
-        if atype in ("pls", "pca_ols"):
+        if atype in ("pls", "pca_ols", "multipls"):
             col = s.get("outcome_column", "outcome")
             lines.append(f'y = df["{col}"]')
         else:
@@ -122,21 +139,14 @@ class Result:
 
         # Fit call
         if atype == "pls":
-            n_comp = s.get("pls_n_components", 1)
-            n_comp_str = f'"{n_comp}"' if n_comp == "auto" else str(n_comp)
-            p_method = s.get("pls_p_method", "auto")
-            p_method_str = f'"{p_method}"' if p_method else "None"
+            k_val = s.get("pls_k", "auto")
+            k_str = f'"{k_val}"' if isinstance(k_val, str) else str(k_val)
             rs = s.get("pls_random_state", "default")
             rs_val = DEFAULT_RANDOM_SEED if rs == "default" else int(rs)
             lines.append("result = ssd.fit_pls(")
-            lines.append(f"    n_components={n_comp_str},")
-            pca_pre = s.get("pls_pca_preprocess")
-            if pca_pre is not None:
-                lines.append(f"    pca_preprocess={pca_pre},")
-            lines.append(f"    p_method={p_method_str},")
-            lines.append(f"    n_perm={s.get('pls_n_perm', Project.__dataclass_fields__['pls_n_perm'].default)},")
-            lines.append(f"    n_splits={s.get('pls_n_splits', Project.__dataclass_fields__['pls_n_splits'].default)},")
-            lines.append(f"    split_ratio={s.get('pls_split_ratio', Project.__dataclass_fields__['pls_split_ratio'].default)},")
+            lines.append(f"    k={k_str},")
+            lines.append(f"    k_max={s.get('pls_k_max', 5)},")
+            lines.append(f"    n_splits={s.get('pls_n_splits', 50)},")
             lines.append(f"    random_state={rs_val},")
             lines.append(")")
         elif atype == "pca_ols":
@@ -154,6 +164,21 @@ class Result:
             lines.append(f"    median_split={s.get('groups_median_split', False)},")
             lines.append(f"    n_perm={s.get('groups_n_perm', Project.__dataclass_fields__['groups_n_perm'].default)},")
             lines.append(f"    correction=\"{s.get('groups_correction', Project.__dataclass_fields__['groups_correction'].default)}\",")
+            lines.append(f"    random_state={rs_val},")
+            lines.append(")")
+        elif atype == "multipls":
+            k_val = s.get("multipls_k", "auto")
+            k_str = f'"{k_val}"' if isinstance(k_val, str) else str(k_val)
+            rotate = s.get("multipls_rotate", "varimax")
+            rot_vocab = s.get("multipls_rotation_vocab", 50_000)
+            rs = s.get("multipls_random_state", "default")
+            rs_val = DEFAULT_RANDOM_SEED if rs == "default" else int(rs)
+            lines.append("result = ssd.fit_multipls(")
+            lines.append(f"    k={k_str},")
+            lines.append(f"    k_max={s.get('multipls_k_max', 5)},")
+            lines.append(f'    rotate="{rotate}",')
+            lines.append(f"    rotation_vocab={rot_vocab},")
+            lines.append(f"    n_splits={s.get('multipls_n_splits', 50)},")
             lines.append(f"    random_state={rs_val},")
             lines.append(")")
 
@@ -186,10 +211,11 @@ _SERIALIZED_FIELDS = [
     "context_window_size", "sif_a",
     "clustering_topn", "clustering_k_auto", "clustering_k_min",
     "clustering_k_max", "clustering_top_words",
-    "pls_n_components", "pls_pca_preprocess", "pls_p_method",
-    "pls_n_perm", "pls_n_splits", "pls_split_ratio", "pls_random_state",
+    "pls_k", "pls_k_max", "pls_n_splits", "pls_random_state",
     "pcaols_n_components", "sweep_k_min", "sweep_k_max", "sweep_k_step",
     "groups_n_perm", "groups_correction", "groups_median_split", "groups_random_state",
+    "multipls_k", "multipls_k_max", "multipls_rotate",
+    "multipls_rotation_vocab", "multipls_n_splits", "multipls_random_state",
 ]
 
 # Fields included in the per-run config snapshot
@@ -207,14 +233,17 @@ _SNAPSHOT_COMMON = [
     "clustering_k_max", "clustering_top_words",
 ]
 _SNAPSHOT_PLS = [
-    "pls_n_components", "pls_pca_preprocess", "pls_p_method",
-    "pls_n_perm", "pls_n_splits", "pls_split_ratio", "pls_random_state",
+    "pls_k", "pls_k_max", "pls_n_splits", "pls_random_state",
 ]
 _SNAPSHOT_PCA_OLS = [
     "pcaols_n_components", "sweep_k_min", "sweep_k_max", "sweep_k_step",
 ]
 _SNAPSHOT_GROUPS = [
     "groups_n_perm", "groups_correction", "groups_median_split", "groups_random_state",
+]
+_SNAPSHOT_MULTIPLS = [
+    "multipls_k", "multipls_k_max", "multipls_rotate",
+    "multipls_rotation_vocab", "multipls_n_splits", "multipls_random_state",
 ]
 
 
@@ -285,25 +314,30 @@ class Project:
     clustering_top_words: int = 10
 
     # -- Hyperparameters: PLS --
-    pls_n_components: int   = _PLS["n_components"].default
-    pls_pca_preprocess: Optional[int] = None
-    pls_p_method:     str   = _PLS["p_method"].default
-    pls_n_perm:       int   = _PLS["n_perm"].default
-    pls_n_splits:     int   = _PLS["n_splits"].default
-    pls_split_ratio:  float = _PLS["split_ratio"].default
-    pls_random_state: str   = "default"
+    pls_k:            Any  = _PLS_K_DEFAULT        # int or "auto"
+    pls_k_max:        int  = _PLS_K_MAX_DEFAULT
+    pls_n_splits:     int  = _PLS_N_SPLITS_DEFAULT
+    pls_random_state: str  = "default"
 
     # -- Hyperparameters: PCA+OLS --
     pcaols_n_components: Optional[int] = None
-    sweep_k_min:  int = _PCAOLS["k_min"].default
-    sweep_k_max:  int = _PCAOLS["k_max"].default
-    sweep_k_step: int = _PCAOLS["k_step"].default
+    sweep_k_min:  int = _PCAOLS_K_MIN_DEFAULT
+    sweep_k_max:  int = _PCAOLS_K_MAX_DEFAULT
+    sweep_k_step: int = _PCAOLS_K_STEP_DEFAULT
 
     # -- Hyperparameters: Groups --
-    groups_n_perm:       int  = _GROUPS["n_perm"].default
-    groups_correction:   str  = _GROUPS["correction"].default
+    groups_n_perm:       int  = _GROUPS_N_PERM_DEFAULT
+    groups_correction:   str  = _GROUPS_CORRECTION_DEFAULT
     groups_median_split: bool = False
     groups_random_state: str  = "default"
+
+    # -- Hyperparameters: MultiPLS --
+    multipls_k:               Any = "auto"           # int or "auto"
+    multipls_k_max:           int = 5
+    multipls_rotate:          str = "varimax"        # "varimax" or "raw"
+    multipls_rotation_vocab:  Optional[int] = 50_000 # None = full vocab
+    multipls_n_splits:        int = 50
+    multipls_random_state:    str = "default"
 
     # -- Results --
     results: List[Result] = field(default_factory=list)
@@ -569,6 +603,12 @@ class Project:
         elif self.analysis_type == "groups":
             for key in _SNAPSHOT_GROUPS:
                 snap[key] = getattr(self, key)
+        elif self.analysis_type == "multipls":
+            for key in _SNAPSHOT_MULTIPLS:
+                snap[key] = getattr(self, key)
+
+        from ..utils.paths import ram_efficient_enabled
+        snap["ram_efficient"] = ram_efficient_enabled()
 
         return snap
 

@@ -8,16 +8,20 @@ from ssdiff import SSD
 from ssdiff_gui.models.project import Project
 
 _CASES = [
-    ("pls_n_components", SSD.fit_pls, "n_components"),
-    ("pls_p_method",     SSD.fit_pls, "p_method"),
-    ("pls_n_perm",       SSD.fit_pls, "n_perm"),
+    ("pls_k",            SSD.fit_pls, "k"),
+    ("pls_k_max",        SSD.fit_pls, "k_max"),
     ("pls_n_splits",     SSD.fit_pls, "n_splits"),
-    ("pls_split_ratio",  SSD.fit_pls, "split_ratio"),
+    ("pcaols_n_components", SSD.fit_ols, "fixed_k"),
     ("sweep_k_min",      SSD.fit_ols, "k_min"),
     ("sweep_k_max",      SSD.fit_ols, "k_max"),
     ("sweep_k_step",     SSD.fit_ols, "k_step"),
     ("groups_n_perm",     SSD.fit_groups, "n_perm"),
     ("groups_correction", SSD.fit_groups, "correction"),
+    ("multipls_k",               SSD.fit_multipls, "k"),
+    ("multipls_k_max",           SSD.fit_multipls, "k_max"),
+    ("multipls_rotate",          SSD.fit_multipls, "rotate"),
+    ("multipls_rotation_vocab",  SSD.fit_multipls, "rotation_vocab"),
+    ("multipls_n_splits",        SSD.fit_multipls, "n_splits"),
 ]
 
 

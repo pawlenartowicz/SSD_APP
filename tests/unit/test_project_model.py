@@ -18,6 +18,7 @@ import pytest
 from ssdiff_gui.models.project import (
     Project,
     _SNAPSHOT_COMMON, _SNAPSHOT_PLS, _SNAPSHOT_PCA_OLS, _SNAPSHOT_GROUPS,
+    _SNAPSHOT_MULTIPLS,
 )
 
 
@@ -37,7 +38,7 @@ def _non_default_values_for_all_fields(tmp_path):
     p.analysis_type = "pca_ols"
     p.lexicon_tokens = ["happy", "sad"]
     p.sweep_k_min = 15
-    p.pls_n_perm = 2000
+    p.pls_k = 4
     p.groups_correction = "bonferroni"
     p._id_row_indices = [[0, 1], [2, 3]]
     return p
@@ -91,9 +92,10 @@ def test_from_dict_with_only_required_keys_uses_defaults(tmp_path):
 
 
 @pytest.mark.parametrize("analysis_type,expected_keys,forbidden_keys", [
-    ("pls",     _SNAPSHOT_PLS,     _SNAPSHOT_PCA_OLS + _SNAPSHOT_GROUPS),
-    ("pca_ols", _SNAPSHOT_PCA_OLS, _SNAPSHOT_PLS + _SNAPSHOT_GROUPS),
-    ("groups",  _SNAPSHOT_GROUPS,  _SNAPSHOT_PLS + _SNAPSHOT_PCA_OLS),
+    ("pls",      _SNAPSHOT_PLS,      _SNAPSHOT_PCA_OLS + _SNAPSHOT_GROUPS + _SNAPSHOT_MULTIPLS),
+    ("pca_ols",  _SNAPSHOT_PCA_OLS,  _SNAPSHOT_PLS + _SNAPSHOT_GROUPS + _SNAPSHOT_MULTIPLS),
+    ("groups",   _SNAPSHOT_GROUPS,   _SNAPSHOT_PLS + _SNAPSHOT_PCA_OLS + _SNAPSHOT_MULTIPLS),
+    ("multipls", _SNAPSHOT_MULTIPLS, _SNAPSHOT_PLS + _SNAPSHOT_PCA_OLS + _SNAPSHOT_GROUPS),
 ])
 def test_snapshot_per_analysis_type(make_project, analysis_type, expected_keys, forbidden_keys):
     p = make_project(analysis_type=analysis_type)
@@ -111,10 +113,10 @@ def test_snapshot_per_analysis_type(make_project, analysis_type, expected_keys, 
 
 def test_snapshot_captures_current_values(make_project):
     p = make_project(analysis_type="pls")
-    p.pls_n_components = 4
+    p.pls_k = 4
     p.context_window_size = 7
     snap = p.snapshot_config()
-    assert snap["pls_n_components"] == 4
+    assert snap["pls_k"] == 4
     assert snap["context_window_size"] == 7
 
 

@@ -849,6 +849,8 @@ class MainWindow(QMainWindow):
             new_dir = self._get_projects_directory()
             if new_dir:
                 self.status_bar.showMessage(f"Projects directory: {new_dir}")
+            if hasattr(self, "stage1_widget"):
+                self.stage1_widget._refresh_prepare_ram_state()
 
     def _open_appearance_dialog(self):
         """Open the appearance/theme settings dialog."""

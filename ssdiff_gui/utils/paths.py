@@ -73,3 +73,18 @@ def embeddings_autoload_enabled() -> bool:
         app_settings().value("embeddings/autoload_on_open", True),
         default=True,
     )
+
+
+def ram_efficient_enabled() -> bool:
+    """Return True if low-RAM (RAM-efficient) embedding mode is on."""
+    from .settings import app_settings
+    return _qsetting_bool(
+        app_settings().value("performance/ram_efficient", False),
+        default=False,
+    )
+
+
+def set_ram_efficient_enabled(value: bool) -> None:
+    """Persist the low-RAM mode flag."""
+    from .settings import app_settings
+    app_settings().setValue("performance/ram_efficient", bool(value))

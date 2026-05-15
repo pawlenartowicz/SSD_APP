@@ -24,16 +24,14 @@ _BASE_CONFIG = {
         {
             **_BASE_CONFIG,
             "analysis_type": "pls",
-            "pls_n_components": 2,
-            "pls_p_method": "perm",
-            "pls_n_perm": 1000,
+            "pls_k": 2,
+            "pls_k_max": 5,
             "pls_n_splits": 50,
-            "pls_split_ratio": 0.5,
             "pls_random_state": "default",
         },
-        ["fit_pls(", "n_components=2", '"perm"', "n_perm=1000",
-         "n_splits=50", "split_ratio=0.5", "random_state=2137"],
-        ["fit_ols(", "fit_groups("],
+        ["fit_pls(", "k=2", "k_max=5",
+         "n_splits=50", "random_state=2137"],
+        ["fit_ols(", "fit_groups(", "n_perm=", "split_ratio=", "p_method"],
     ),
     (
         {
@@ -65,12 +63,41 @@ _BASE_CONFIG = {
             **_BASE_CONFIG,
             "analysis_type": "pls",
             "concept_mode": "fulldoc",
-            "pls_n_components": 1,
-            "pls_p_method": "auto",
+            "pls_k": 1,
             "pls_random_state": "default",
         },
         ["use_full_doc=True", "set(t for doc"],
         ["lexicon = ['happy'"],
+    ),
+    (
+        {
+            **_BASE_CONFIG,
+            "analysis_type": "multipls",
+            "multipls_k": 2,
+            "multipls_k_max": 5,
+            "multipls_rotate": "varimax",
+            "multipls_rotation_vocab": 50_000,
+            "multipls_n_splits": 50,
+            "multipls_random_state": "default",
+        },
+        ["ssd.fit_multipls(", "k=2", "k_max=5", 'rotate="varimax"',
+         "rotation_vocab=50000", "n_splits=50", "random_state=2137"],
+        ["fit_pls(", "fit_ols(", "fit_groups(",
+         "n_perm=", "split_ratio=", "p_method"],
+    ),
+    (
+        {
+            **_BASE_CONFIG,
+            "analysis_type": "multipls",
+            "multipls_k": "auto",
+            "multipls_k_max": 5,
+            "multipls_rotate": "varimax",
+            "multipls_rotation_vocab": 50_000,
+            "multipls_n_splits": 50,
+            "multipls_random_state": "default",
+        },
+        ["ssd.fit_multipls(", 'k="auto"'],
+        ["fit_pls(", "fit_ols(", "fit_groups("],
     ),
 ])
 def test_script_contains_expected_args(make_result, config, must_contain, must_not_contain):
@@ -86,14 +113,17 @@ def test_all_generated_scripts_compile(make_result):
     """VERBATIM regression guard: generated Python must parse."""
     configs = [
         {**_BASE_CONFIG, "analysis_type": "pls",
-         "pls_n_components": 1, "pls_p_method": "auto",
-         "pls_random_state": "default"},
+         "pls_k": 1, "pls_random_state": "default"},
         {**_BASE_CONFIG, "analysis_type": "pca_ols",
          "pcaols_n_components": None, "sweep_k_min": 20,
          "sweep_k_max": 120, "sweep_k_step": 2},
         {**_BASE_CONFIG, "analysis_type": "groups",
          "groups_n_perm": 5000, "groups_correction": "holm",
          "groups_median_split": False, "groups_random_state": "default"},
+        {**_BASE_CONFIG, "analysis_type": "multipls",
+         "multipls_k": "auto", "multipls_k_max": 5,
+         "multipls_rotate": "varimax", "multipls_rotation_vocab": None,
+         "multipls_n_splits": 50, "multipls_random_state": "default"},
     ]
     for cfg in configs:
         r = make_result(config_snapshot=cfg)

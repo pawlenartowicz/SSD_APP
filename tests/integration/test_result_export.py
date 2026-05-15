@@ -26,7 +26,7 @@ def _make_pls(tiny_embeddings, synthetic_corpus):
     y = rng.randn(len(synthetic_corpus.docs))
     lexicon = ["happy", "sad", "angry", "love", "hate"]
     return SSD(tiny_embeddings, synthetic_corpus, y, lexicon, window=3).fit_pls(
-        n_components=1, p_method=None,
+        k=1,
     )
 
 

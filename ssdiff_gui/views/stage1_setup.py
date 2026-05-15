@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QComboBox,
-    QCheckBox,
     QSpinBox,
     QFileDialog,
     QMessageBox,
@@ -391,21 +390,39 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
         self.emb_source_path.setReadOnly(True)
         file_row.addWidget(self.emb_source_path, stretch=1)
 
-        browse_emb_btn = QPushButton("Browse...")
-        browse_emb_btn.clicked.connect(self._browse_embeddings_source)
-        file_row.addWidget(browse_emb_btn)
+        self._browse_emb_btn = QPushButton("Browse...")
+        self._browse_emb_btn.clicked.connect(self._browse_embeddings_source)
+        file_row.addWidget(self._browse_emb_btn)
         prepare_layout.addLayout(file_row)
+
+        # Banner shown when Low-RAM mode disables the Prepare subgroup
+        self._ram_banner = QFrame()
+        self._ram_banner.setObjectName("frame_ram_banner")
+        bnr = QHBoxLayout(self._ram_banner)
+        bnr.setContentsMargins(8, 6, 8, 6)
+        bnr_label = QLabel(
+            "Disabled because <b>Low-RAM mode</b> is on. "
+            "Pre-prepared embeddings only."
+        )
+        bnr_label.setWordWrap(True)
+        bnr.addWidget(bnr_label, stretch=1)
+        disable_btn = QPushButton("Disable Low-RAM mode")
+        disable_btn.clicked.connect(self._disable_ram_mode_from_banner)
+        bnr.addWidget(disable_btn)
+        self._ram_banner.setVisible(False)
+        prepare_layout.addWidget(self._ram_banner)
 
         # Normalization row
         norm_row = QHBoxLayout()
-        self.l2_check = QCheckBox("L2 Normalize")
-        self.l2_check.setChecked(True)
-        norm_row.addWidget(self.l2_check)
         norm_row.addWidget(QLabel("ABTT:"))
         self.abtt_spin = QSpinBox()
         self.abtt_spin.setRange(0, 10)
         self.abtt_spin.setValue(1)
         norm_row.addWidget(self.abtt_spin)
+
+        norm_hint = QLabel("L2-normalised on save (required by SSD).")
+        norm_hint.setObjectName("label_muted")
+        norm_row.addWidget(norm_hint)
         norm_row.addStretch()
         self.prepare_btn = QPushButton("Load && Prepare")
         self.prepare_btn.setEnabled(False)
@@ -465,6 +482,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
             "<b>Select:</b> Choose a prepared embedding for analysis. "
             "Exactly one embedding is loaded into RAM at a time.",
         )
+        self._refresh_prepare_ram_state()
         return group
 
     def _create_ready_indicator(self, parent_layout):
@@ -928,6 +946,25 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
 
     # --- Embedding prepare / select methods ---
 
+    def _refresh_prepare_ram_state(self):
+        """Disable Prepare-Embeddings widgets when low-RAM mode is on; show inline banner."""
+        from ..utils.paths import ram_efficient_enabled
+        ram_on = ram_efficient_enabled()
+
+        has_source = bool(self.emb_source_path.text())
+        self.emb_source_path.setEnabled(not ram_on)
+        self.abtt_spin.setEnabled(not ram_on and has_source)
+        self.prepare_btn.setEnabled(not ram_on and has_source)
+
+        self._browse_emb_btn.setEnabled(not ram_on)
+
+        self._ram_banner.setVisible(ram_on)
+
+    def _disable_ram_mode_from_banner(self):
+        from ..utils.paths import set_ram_efficient_enabled
+        set_ram_efficient_enabled(False)
+        self._refresh_prepare_ram_state()
+
     def _browse_embeddings_source(self):
         """Browse for a source embedding file."""
         path, _ = QFileDialog.getOpenFileName(
@@ -939,12 +976,11 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
         if path:
             self.emb_source_path.setText(path)
             self._settings.setValue("last_emb_dir", str(Path(path).parent))
-            self.prepare_btn.setEnabled(True)
+            self._refresh_prepare_ram_state()
             # If source is .ssdembed, read flags to constrain L2/ABTT
             if path.endswith(".ssdembed"):
                 self._apply_ssdembed_constraints(Path(path))
             else:
-                self.l2_check.setEnabled(True)
                 self.abtt_spin.setMinimum(0)
 
     def _apply_ssdembed_constraints(self, path: Path):
@@ -957,21 +993,14 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
             import pickle
             with open(path, "rb") as f:
                 obj = pickle.load(f)
-            is_l2 = getattr(obj, "l2_normalized", False)
             cur_abtt = getattr(obj, "abtt", 0)
             del obj
-            if is_l2:
-                self.l2_check.setChecked(True)
-                self.l2_check.setEnabled(False)
-            else:
-                self.l2_check.setEnabled(True)
             if cur_abtt > 0:
                 self.abtt_spin.setMinimum(cur_abtt)
                 self.abtt_spin.setValue(cur_abtt)
             else:
                 self.abtt_spin.setMinimum(0)
         except Exception:
-            self.l2_check.setEnabled(True)
             self.abtt_spin.setMinimum(0)
 
     def _prepare_embedding(self):
@@ -984,14 +1013,12 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
             return
         output_dir = embeddings_dir()
         output_dir.mkdir(parents=True, exist_ok=True)
-        l2 = self.l2_check.isChecked()
         abtt = self.abtt_spin.value()
         self.prepare_btn.setEnabled(False)
         self.prepare_status.setText("Preparing...")
         self._prepare_worker = EmbeddingPrepareWorker(
             source_path=Path(source),
             output_dir=output_dir,
-            l2_normalize=l2,
             abtt=abtt,
             parent=self,
         )
@@ -1014,7 +1041,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
         """Handle embedding preparation completion."""
         if hasattr(self, "_progress_dialog") and self._progress_dialog:
             self._progress_dialog.accept()
-        self.prepare_btn.setEnabled(True)
+        self._refresh_prepare_ram_state()
         new_hash = ProjectIO.compute_embedding_hash(Path(saved_path))
         existing = ProjectIO.find_duplicate_embedding(self.project, new_hash)
         saved_name = Path(saved_path).name
@@ -1047,7 +1074,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
     def _on_embedding_prepare_error(self, error_msg: str):
         if hasattr(self, "_progress_dialog") and self._progress_dialog:
             self._progress_dialog.accept()
-        self.prepare_btn.setEnabled(True)
+        self._refresh_prepare_ram_state()
         self.prepare_status.setText("Preparation failed")
         QMessageBox.critical(self, "Error", error_msg)
 
@@ -1097,6 +1124,16 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
         emb_path = embeddings_dir() / filename
         if not emb_path.exists():
             QMessageBox.warning(self, "Error", f"File not found: {filename}")
+            self._autoloading_embedding = False
+            return
+        from ..utils.paths import ram_efficient_enabled
+        if ram_efficient_enabled() and self.project._corpus is None:
+            QMessageBox.warning(
+                self, "Preprocess First",
+                "Low-RAM mode requires a built corpus. Run preprocessing "
+                "in Section 1 before selecting an embedding.",
+            )
+            self._autoloading_embedding = False
             return
         # Unload current embedding and detach from results
         self.project._emb = None
@@ -1109,6 +1146,7 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
         self._load_worker = EmbeddingLoadWorker(
             ssdembed_path=emb_path,
             docs=self.project._docs,
+            corpus=self.project._corpus,
             parent=self,
         )
 
@@ -1465,8 +1503,8 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
 
         # Load embedding config — refresh table and restore status
         self._refresh_embeddings_table()
-        self.l2_check.setChecked(project.l2_normalized)
         self.abtt_spin.setValue(project.abtt)
+        self._refresh_prepare_ram_state()
 
         if project.selected_embedding:
             self.emb_status.setText(
@@ -1514,5 +1552,5 @@ class Stage1Widget(OverlayInfoMixin, QWidget):
 
         # Embedding config is managed by the prepare/select workflow;
         # only persist the ABTT/L2 defaults from the "Prepare" panel.
-        project.l2_normalized = self.l2_check.isChecked()
+        project.l2_normalized = True
         project.abtt = self.abtt_spin.value()

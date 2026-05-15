@@ -170,6 +170,14 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         self.analysis_type_group.addButton(self.pls_btn, 0)
         btn_row.addWidget(self.pls_btn)
 
+        self.multipls_btn = QPushButton("MultiPLS")
+        self.multipls_btn.setCheckable(True)
+        self.multipls_btn.setObjectName("btn_model_select")
+        self.multipls_btn.setMinimumHeight(36)
+        self.multipls_btn.setCursor(Qt.PointingHandCursor)
+        self.analysis_type_group.addButton(self.multipls_btn, 3)
+        btn_row.addWidget(self.multipls_btn)
+
         self.groups_btn = QPushButton("Groups")
         self.groups_btn.setCheckable(True)
         self.groups_btn.setObjectName("btn_model_select")
@@ -221,6 +229,7 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         # Connect signals
         self.pls_btn.toggled.connect(self._on_analysis_type_changed)
         self.pcaols_btn.toggled.connect(self._on_analysis_type_changed)
+        self.multipls_btn.toggled.connect(self._on_analysis_type_changed)
         self.groups_btn.toggled.connect(self._on_analysis_type_changed)
         self.lexicon_radio.toggled.connect(self._on_mode_changed)
 
@@ -291,38 +300,23 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         pls_form.setHorizontalSpacing(12)
         pls_form.setVerticalSpacing(6)
 
-        self.pls_n_comp_spin = QSpinBox()
-        self.pls_n_comp_spin.setRange(0, 50)
-        self.pls_n_comp_spin.setValue(1)
-        self.pls_n_comp_spin.setSpecialValueText("auto")
+        self.pls_k_spin = QSpinBox()
+        self.pls_k_spin.setRange(0, 50)
+        self.pls_k_spin.setValue(0)
+        self.pls_k_spin.setSpecialValueText("auto")
         _form_row(
-            "Components:", self.pls_n_comp_spin,
-            "Number of PLS components to extract.<br>"
-            "'auto' uses cross-validation to select the best number.",
+            "k (components):", self.pls_k_spin,
+            "Number of PLS components. 'auto' (= 0) uses<br>"
+            "plskit.pls1_find_k_optimal with selector='r2_se'.",
             pls_form,
         )
 
-        self.pls_p_method_combo = QComboBox()
-        self.pls_p_method_combo.addItems(["auto", "perm", "split", "split_cal", "none"])
+        self.pls_k_max_spin = QSpinBox()
+        self.pls_k_max_spin.setRange(1, 50)
+        self.pls_k_max_spin.setValue(5)
         _form_row(
-            "p-method:", self.pls_p_method_combo,
-            "Statistical testing method.<br>"
-            "<b>perm</b> \u2014 permutation test<br>"
-            "<b>split</b> \u2014 formula-calibrated split-half<br>"
-            "<b>split_cal</b> \u2014 permutation-calibrated split-half<br>"
-            "<b>none</b> \u2014 skip testing",
-            pls_form,
-        )
-
-        self.pls_n_perm_label = QLabel("Permutations:")
-        self.pls_n_perm_spin = QSpinBox()
-        self.pls_n_perm_spin.setRange(100, 100000)
-        self.pls_n_perm_spin.setValue(1000)
-        self.pls_n_perm_spin.setSingleStep(100)
-        self._pls_perm_info = _form_row(
-            self.pls_n_perm_label, self.pls_n_perm_spin,
-            "Number of permutations for the permutation test.<br>"
-            "More = more precise p-values, slower.",
+            "k max (auto):", self.pls_k_max_spin,
+            "Cap when k='auto'. Ignored when k is a fixed integer.",
             pls_form,
         )
 
@@ -333,19 +327,6 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         self._pls_splits_info = _form_row(
             self.pls_n_splits_label, self.pls_n_splits_spin,
             "Number of random splits for the split-half test.",
-            pls_form,
-        )
-
-        self.pls_split_ratio_label = QLabel("Split ratio:")
-        self.pls_split_ratio_spin = QDoubleSpinBox()
-        self.pls_split_ratio_spin.setRange(0.1, 0.9)
-        self.pls_split_ratio_spin.setValue(0.5)
-        self.pls_split_ratio_spin.setSingleStep(0.05)
-        self.pls_split_ratio_spin.setDecimals(2)
-        self._pls_ratio_info = _form_row(
-            self.pls_split_ratio_label, self.pls_split_ratio_spin,
-            "Proportion of data in the training half<br>"
-            "(0.5 = equal split).",
             pls_form,
         )
 
@@ -362,8 +343,69 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         self.pls_frame.setVisible(True)
         content.addWidget(self.pls_frame)
 
-        # Connect PLS p-method to show/hide perm/split params
-        self.pls_p_method_combo.currentTextChanged.connect(self._on_pls_p_method_changed)
+        # -- MultiPLS Settings section --
+        self.multipls_section_label = _section_label("MULTIPLS")
+        content.addWidget(self.multipls_section_label)
+        self.multipls_section_label.setVisible(False)
+
+        self.multipls_frame = QFrame()
+        mp_form = QFormLayout(self.multipls_frame)
+        mp_form.setContentsMargins(4, 2, 0, 0)
+        mp_form.setHorizontalSpacing(12)
+        mp_form.setVerticalSpacing(6)
+
+        self.multipls_k_spin = QSpinBox()
+        self.multipls_k_spin.setRange(0, 50)
+        self.multipls_k_spin.setValue(0)
+        self.multipls_k_spin.setSpecialValueText("auto")
+        _form_row(
+            "k (rotated dims):", self.multipls_k_spin,
+            "Number of rotated PLS dimensions. 'auto' selects via<br>"
+            "plskit.pls1_find_k_optimal (selector='r2_se').",
+            mp_form,
+        )
+
+        self.multipls_k_max_spin = QSpinBox()
+        self.multipls_k_max_spin.setRange(1, 50)
+        self.multipls_k_max_spin.setValue(5)
+        _form_row("k max (auto):", self.multipls_k_max_spin,
+                  "Cap when k='auto'.", mp_form)
+
+        self.multipls_rotate_combo = QComboBox()
+        self.multipls_rotate_combo.addItems(["varimax", "raw"])
+        _form_row(
+            "Rotation:", self.multipls_rotate_combo,
+            "<b>varimax</b> — simple-structure rotation against<br>"
+            "the top-N vocab (default).<br>"
+            "<b>raw</b> — keep unrotated W (axes lose interpretability).",
+            mp_form,
+        )
+
+        self.multipls_rotation_vocab_spin = QSpinBox()
+        self.multipls_rotation_vocab_spin.setRange(0, 1_000_000)
+        self.multipls_rotation_vocab_spin.setValue(50_000)
+        self.multipls_rotation_vocab_spin.setSpecialValueText("full vocab")
+        _form_row(
+            "Rotation vocab:", self.multipls_rotation_vocab_spin,
+            "Top-N vocab rows used as the varimax target.<br>"
+            "0 = full vocab. 50k matches the low-RAM prefix.",
+            mp_form,
+        )
+
+        self.multipls_n_splits_spin = QSpinBox()
+        self.multipls_n_splits_spin.setRange(10, 1000)
+        self.multipls_n_splits_spin.setValue(50)
+        _form_row("Splits (split_nb):", self.multipls_n_splits_spin,
+                  "Random splits for the container-level p-value.", mp_form)
+
+        self.multipls_random_state_combo = QComboBox()
+        self.multipls_random_state_combo.setEditable(True)
+        self.multipls_random_state_combo.addItem("default")
+        _form_row("Random state:", self.multipls_random_state_combo,
+                  "Seed; 'default' = 2137.", mp_form)
+
+        self.multipls_frame.setVisible(False)
+        content.addWidget(self.multipls_frame)
 
         # -- PCA+OLS section --
         self.sweep_section_label = _section_label("PCA + OLS")
@@ -525,7 +567,7 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         if not checked:
             return
         # Update button styles
-        for btn in [self.pls_btn, self.pcaols_btn, self.groups_btn]:
+        for btn in [self.pls_btn, self.pcaols_btn, self.multipls_btn, self.groups_btn]:
             if btn.isChecked():
                 btn.setObjectName("btn_model_select_active")
             else:
@@ -536,6 +578,7 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         is_groups = self.groups_btn.isChecked()
         is_pls = self.pls_btn.isChecked()
         is_pcaols = self.pcaols_btn.isChecked()
+        is_multipls = self.multipls_btn.isChecked()
         self.column_label.setText("Group Column:" if is_groups else "Outcome Column:")
 
         # Show/hide analysis-type-specific settings (frame + section label)
@@ -545,25 +588,13 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         self.sweep_frame.setVisible(is_pcaols)
         self.groups_section_label.setVisible(is_groups)
         self.groups_frame.setVisible(is_groups)
+        self.multipls_section_label.setVisible(is_multipls)
+        self.multipls_frame.setVisible(is_multipls)
 
         # Repopulate column combo for the new type
         self._populate_column_combo()
         self._on_column_changed()
         self._update_run_button()
-
-    def _on_pls_p_method_changed(self, method: str):
-        """Show/hide PLS sub-params based on selected p-method."""
-        shows_perm = method in ("auto", "perm", "split_cal")
-        shows_split = method in ("auto", "split", "split_cal")
-        self.pls_n_perm_label.setVisible(shows_perm)
-        self.pls_n_perm_spin.setVisible(shows_perm)
-        self._pls_perm_info.setVisible(shows_perm)
-        self.pls_n_splits_label.setVisible(shows_split)
-        self.pls_n_splits_spin.setVisible(shows_split)
-        self._pls_splits_info.setVisible(shows_split)
-        self.pls_split_ratio_label.setVisible(shows_split)
-        self.pls_split_ratio_spin.setVisible(shows_split)
-        self._pls_ratio_info.setVisible(shows_split)
 
     def _on_fixed_k_toggled(self, checked: bool):
         """Enable/disable fixed K spin and sweep range widgets."""
@@ -593,6 +624,8 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
             return "pls"
         elif self.pcaols_btn.isChecked():
             return "pca_ols"
+        elif self.multipls_btn.isChecked():
+            return "multipls"
         else:
             return "groups"
 
@@ -1060,6 +1093,7 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         type_label = {
             "pls": "PLS (Continuous)",
             "pca_ols": "PCA+OLS (Continuous)",
+            "multipls": "MultiPLS (Continuous, rotated)",
             "groups": "Group Comparison",
         }.get(p.analysis_type, p.analysis_type)
         html.append(
@@ -1667,7 +1701,7 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         atype = self._get_analysis_type()
         col = self.column_combo.currentText()
 
-        if atype in ("pls", "pca_ols") and (not col or col == "(none)"):
+        if atype in ("pls", "pca_ols", "multipls") and (not col or col == "(none)"):
             QMessageBox.warning(self, "Missing Column",
                                 "Please select an outcome column before running.")
             return
@@ -1725,11 +1759,10 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         # clustering_top_words is display-only (default 10); don't overwrite from topn spin
 
         # PLS
-        p.pls_n_components = self.pls_n_comp_spin.value()
-        p.pls_p_method = self.pls_p_method_combo.currentText()
-        p.pls_n_perm = self.pls_n_perm_spin.value()
+        k_val = self.pls_k_spin.value()
+        p.pls_k = "auto" if k_val == 0 else k_val
+        p.pls_k_max = self.pls_k_max_spin.value()
         p.pls_n_splits = self.pls_n_splits_spin.value()
-        p.pls_split_ratio = self.pls_split_ratio_spin.value()
         p.pls_random_state = self.pls_random_state_combo.currentText()
 
         # PCA+OLS
@@ -1746,6 +1779,16 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         p.groups_correction = self.groups_correction_combo.currentText()
         p.groups_median_split = self.groups_median_split_check.isChecked()
         p.groups_random_state = self.groups_random_state_combo.currentText()
+
+        # MultiPLS
+        mp_k = self.multipls_k_spin.value()
+        p.multipls_k = "auto" if mp_k == 0 else mp_k
+        p.multipls_k_max = self.multipls_k_max_spin.value()
+        p.multipls_rotate = self.multipls_rotate_combo.currentText()
+        rv = self.multipls_rotation_vocab_spin.value()
+        p.multipls_rotation_vocab = None if rv == 0 else rv
+        p.multipls_n_splits = self.multipls_n_splits_spin.value()
+        p.multipls_random_state = self.multipls_random_state_combo.currentText()
 
         # Persist lexicon tokens
         p.lexicon_tokens = list(self.lexicon)
@@ -1768,10 +1811,12 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
             self.groups_btn.setChecked(True)
         elif atype == "pca_ols":
             self.pcaols_btn.setChecked(True)
+        elif atype == "multipls":
+            self.multipls_btn.setChecked(True)
         else:
             self.pls_btn.setChecked(True)
         # Update button styles
-        for btn in [self.pls_btn, self.pcaols_btn, self.groups_btn]:
+        for btn in [self.pls_btn, self.pcaols_btn, self.multipls_btn, self.groups_btn]:
             btn.setObjectName("btn_model_select_active" if btn.isChecked() else "btn_model_select")
             btn.style().unpolish(btn)
             btn.style().polish(btn)
@@ -1807,14 +1852,15 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         self.cluster_k_max_spin.setValue(project.clustering_k_max)
 
         # PLS
-        self.pls_n_comp_spin.setValue(project.pls_n_components)
-        idx = self.pls_p_method_combo.findText(project.pls_p_method)
-        if idx >= 0:
-            self.pls_p_method_combo.setCurrentIndex(idx)
-        self.pls_n_perm_spin.setValue(project.pls_n_perm)
+        k = project.pls_k
+        self.pls_k_spin.setValue(0 if k == "auto" else int(k))
+        self.pls_k_max_spin.setValue(project.pls_k_max)
         self.pls_n_splits_spin.setValue(project.pls_n_splits)
-        self.pls_split_ratio_spin.setValue(project.pls_split_ratio)
-        self.pls_random_state_combo.setCurrentText(project.pls_random_state)
+        idx = self.pls_random_state_combo.findText(project.pls_random_state)
+        if idx >= 0:
+            self.pls_random_state_combo.setCurrentIndex(idx)
+        else:
+            self.pls_random_state_combo.setEditText(project.pls_random_state)
 
         # PCA+OLS
         if project.pcaols_n_components is not None:
@@ -1834,6 +1880,22 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         self.groups_median_split_check.setChecked(project.groups_median_split)
         self.groups_random_state_combo.setCurrentText(project.groups_random_state)
 
+        # MultiPLS
+        mp_k = project.multipls_k
+        self.multipls_k_spin.setValue(0 if mp_k == "auto" else int(mp_k))
+        self.multipls_k_max_spin.setValue(project.multipls_k_max)
+        idx = self.multipls_rotate_combo.findText(project.multipls_rotate)
+        if idx >= 0:
+            self.multipls_rotate_combo.setCurrentIndex(idx)
+        rv = project.multipls_rotation_vocab
+        self.multipls_rotation_vocab_spin.setValue(0 if rv is None else int(rv))
+        self.multipls_n_splits_spin.setValue(project.multipls_n_splits)
+        idx = self.multipls_random_state_combo.findText(project.multipls_random_state)
+        if idx >= 0:
+            self.multipls_random_state_combo.setCurrentIndex(idx)
+        else:
+            self.multipls_random_state_combo.setEditText(project.multipls_random_state)
+
         # Context window visibility
         self.window_size_label.setVisible(is_lexicon)
         self.window_size_spin.setVisible(is_lexicon)
@@ -1846,7 +1908,8 @@ class Stage2Widget(OverlayInfoMixin, QWidget):
         self.sweep_frame.setVisible(atype == "pca_ols")
         self.groups_section_label.setVisible(atype == "groups")
         self.groups_frame.setVisible(atype == "groups")
-        self._on_pls_p_method_changed(project.pls_p_method)
+        self.multipls_section_label.setVisible(atype == "multipls")
+        self.multipls_frame.setVisible(atype == "multipls")
 
         # Column label
         self.column_label.setText("Group Column:" if atype == "groups" else "Outcome Column:")

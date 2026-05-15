@@ -76,9 +76,7 @@ def tiny_embeddings():
         "beautiful", "ugly", "nice", "mean", "sweet",
     ]
     vecs = rng.randn(len(words), 10).astype(np.float32)
-    norms = np.linalg.norm(vecs, axis=1, keepdims=True)
-    vecs = vecs / np.where(norms > 0, norms, 1.0)
-    return Embeddings(words, vecs)
+    return Embeddings(words, vecs).normalize(l2=True, abtt=1)
 
 
 @pytest.fixture(scope="session")

@@ -62,12 +62,12 @@ def test_pls_roundtrip(tmp_path, tiny_embeddings, synthetic_corpus):
     lexicon = ["happy", "sad", "angry", "love", "hate"]
 
     ssd = SSD(tiny_embeddings, synthetic_corpus, y, lexicon, window=3)
-    ssd_result = ssd.fit_pls(n_components=1, p_method=None)
+    ssd_result = ssd.fit_pls(k=1)
 
     project = _make_project(tmp_path)
     ProjectIO.create_project_structure(project.project_path)
     result = _make_result_wrapper(project, "20260414_pls", {
-        "analysis_type": "pls", "pls_n_components": 1,
+        "analysis_type": "pls", "pls_k": 1,
     })
     result._result = ssd_result
 
@@ -145,13 +145,13 @@ def test_replication_script_generated_and_executes(tmp_path, tiny_embeddings, sy
     lexicon = ["happy", "sad", "angry", "love", "hate"]
 
     ssd = SSD(tiny_embeddings, synthetic_corpus, y, lexicon, window=3)
-    ssd_result = ssd.fit_pls(n_components=1, p_method=None)
+    ssd_result = ssd.fit_pls(k=1)
 
     project = _make_project(tmp_path)
     ProjectIO.create_project_structure(project.project_path)
     result = _make_result_wrapper(project, "20260414_script", {
-        "analysis_type": "pls", "pls_n_components": 1,
-        "pls_p_method": None, "pls_random_state": "default",
+        "analysis_type": "pls", "pls_k": 1,
+        "pls_random_state": "default",
         "csv_path": "/data/test.csv", "csv_encoding": "utf-8-sig",
         "text_column": "text", "language": "en",
         "selected_embedding": "glove.ssdembed",
@@ -168,5 +168,5 @@ def test_replication_script_generated_and_executes(tmp_path, tiny_embeddings, sy
     assert script_path.exists()
     content = script_path.read_text()
     assert "fit_pls(" in content
-    assert "n_components=1" in content
+    assert "k=1" in content
     compile(content, "<replication_script>", "exec")

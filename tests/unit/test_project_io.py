@@ -56,7 +56,7 @@ def _make_result(project: Project, result_id="20260414_143000", status="pending"
             "analysis_type": "pls",
             "csv_path": "/data/test.csv",
             "text_column": "text",
-            "pls_n_components": 1,
+            "pls_k": 1,
         },
         status=status,
     )

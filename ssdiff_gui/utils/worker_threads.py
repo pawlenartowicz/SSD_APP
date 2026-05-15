@@ -1,10 +1,13 @@
 """Background worker threads for SSD."""
 
 from PySide6.QtCore import QThread, Signal
-from typing import List, Any, Optional, Union
+from typing import List, Any, Optional, Union, TYPE_CHECKING
 from pathlib import Path
 import os
 import ssl
+
+if TYPE_CHECKING:
+    from ssdiff import Corpus
 
 
 def _urlopen(req, *, timeout=30):
@@ -224,14 +227,12 @@ class EmbeddingPrepareWorker(QThread):
         self,
         source_path: Path,
         output_dir: Path,
-        l2_normalize: bool = True,
         abtt: int = 0,
         parent=None,
     ):
         super().__init__(parent)
         self.source_path = source_path
         self.output_dir = output_dir
-        self.l2_normalize = l2_normalize
         self.abtt = abtt
         self._is_cancelled = False
 
@@ -251,17 +252,14 @@ class EmbeddingPrepareWorker(QThread):
             if self._is_cancelled:
                 return
 
-            # Check if source already has matching normalization
+            # Always L2-normalise (required by SSD); optionally apply ABTT.
             source_l2 = emb.l2_normalized
             source_abtt = getattr(emb, "abtt", 0)
-            needs_normalize = (
-                (self.l2_normalize and not source_l2) or
-                (self.abtt > source_abtt)
-            )
+            needs_normalize = (not source_l2) or (self.abtt > source_abtt)
 
             if needs_normalize:
                 self.progress.emit(55, "Normalizing embeddings...")
-                emb.normalize(l2=self.l2_normalize, abtt=self.abtt)
+                emb.normalize(l2=True, abtt=self.abtt)
             else:
                 self.progress.emit(55, "Normalization already applied.")
 
@@ -335,11 +333,13 @@ class EmbeddingLoadWorker(QThread):
         self,
         ssdembed_path: Path,
         docs: Optional[List[List[str]]] = None,
+        corpus: 'Optional[Corpus]' = None,
         parent=None,
     ):
         super().__init__(parent)
         self.ssdembed_path = ssdembed_path
         self.docs = docs
+        self.corpus = corpus
         self._is_cancelled = False
 
     def cancel(self):
@@ -348,9 +348,23 @@ class EmbeddingLoadWorker(QThread):
     def run(self):
         try:
             from ssdiff import Embeddings
+            from ..utils.paths import ram_efficient_enabled
+
+            ram_mode = ram_efficient_enabled()
+
+            if ram_mode and self.corpus is None:
+                raise RuntimeError(
+                    "Low-RAM mode requires a built corpus. Preprocess "
+                    "your texts in Stage 1 first, then re-select the embedding."
+                )
 
             self.progress.emit(20, "Loading prepared embedding...")
-            emb = Embeddings.load(str(self.ssdembed_path))
+            if ram_mode:
+                emb = Embeddings.load(str(self.ssdembed_path), ram_efficient=True)
+                self.progress.emit(50, "Materialising corpus tokens...")
+                emb.attach_corpus(self.corpus)
+            else:
+                emb = Embeddings.load(str(self.ssdembed_path))
 
             if self._is_cancelled:
                 return
@@ -361,6 +375,7 @@ class EmbeddingLoadWorker(QThread):
                 "embedding_dim": emb.vector_size,
                 "l2_normalized": emb.l2_normalized,
                 "abtt": getattr(emb, "abtt", 0),
+                "ram_efficient": bool(getattr(emb, "_partial", False)),
             }
 
             if self.docs:

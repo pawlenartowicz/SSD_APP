@@ -31,6 +31,7 @@ def _qt_app():
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "spacy: needs spaCy + en_core_web_sm model")
+    config.addinivalue_line("markers", "slow: heavy test that needs real embeddings")
 
 
 _VOCAB_WORDS = [
@@ -66,6 +67,15 @@ class StringFakeSettings(FakeSettings):
 
     def setValue(self, key, value):
         self._store[key] = str(value)
+
+
+@pytest.fixture
+def qsettings_clean():
+    from ssdiff_gui.utils.settings import app_settings
+    s = app_settings()
+    s.remove("performance/ram_efficient")
+    yield
+    s.remove("performance/ram_efficient")
 
 
 @pytest.fixture
@@ -149,9 +159,38 @@ def make_result(tmp_path):
             result_id=result_id,
             timestamp=datetime(2026, 4, 14, 12, 0, 0),
             result_path=result_path,
-            config_snapshot={"analysis_type": "pls", "pls_n_components": 1},
+            config_snapshot={"analysis_type": "pls", "pls_k": 1},
         )
         defaults.update(overrides)
         return Result(**defaults)
 
     return _factory
+
+
+@pytest.fixture
+def tiny_project_multipls(make_project, tiny_embeddings, synthetic_corpus, synthetic_texts):
+    """Project pre-wired for a small multipls run; requires real embeddings.
+
+    Used by the @slow integration smoke test for SSDRunner._run_multipls.
+    """
+    import numpy as np
+    from ssdiff import Corpus
+
+    p = make_project(
+        analysis_type="multipls",
+        concept_mode="fulldoc",
+        text_column="text",
+        outcome_column="score",
+        language="en",
+        multipls_k=2,
+        multipls_k_max=3,
+        multipls_n_splits=10,
+        multipls_rotation_vocab=None,
+    )
+    p._emb = tiny_embeddings
+    p._corpus = synthetic_corpus
+    p._docs = synthetic_corpus.docs
+    p._pre_docs = synthetic_corpus.pre_docs
+    rng = np.random.default_rng(7)
+    p._y = rng.standard_normal(len(p._docs))
+    return p
