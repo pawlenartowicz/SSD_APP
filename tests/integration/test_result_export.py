@@ -184,6 +184,44 @@ def test_groups_pairs_writes_expected_file(
     )
 
 
+def test_groups_clusters_fan_out_per_pair(
+    tmp_path, tiny_embeddings, synthetic_corpus,
+):
+    """GroupResult exposes clusters as a _ShimView keyed by pair, not
+    sided. The exporter must dispatch on view shape so it doesn't crash
+    looking for `.pos` on the shim."""
+    from ssdiff_gui.utils.result_export import export_result
+    from ssdiff_gui.utils.save_config import ItemConfig, SaveConfig
+
+    cfg = replace(
+        SaveConfig.default(),
+        items={
+            **SaveConfig.default().items,
+            "clusters": ItemConfig(enabled=True),
+            "cluster_words": ItemConfig(enabled=True),
+        },
+    )
+
+    result = _wrap(
+        tmp_path / "r", _make_groups(tiny_embeddings, synthetic_corpus),
+        config_snapshot={"analysis_type": "groups"},
+    )
+    export_result(result, result.result_path, cfg)
+
+    tables = result.result_path / "tables"
+    # For N=1 pair the shim collapses to a single file; for N≥2 it fans out
+    # into a clusters/ subdir. Either form is correct — what matters is the
+    # exporter no longer crashes calling .pos on the shim.
+    single = (tables / "clusters.csv").exists()
+    fanned = (tables / "clusters").is_dir() and any(
+        (tables / "clusters").glob("*.csv")
+    )
+    assert single or fanned, list(tables.iterdir())
+    # cluster_words fan out per-pair, per-side
+    assert list(tables.glob("cluster_words_*_pos.csv"))
+    assert list(tables.glob("cluster_words_*_neg.csv"))
+
+
 def test_words_cols_subset_produces_exact_header(
     tmp_path, tiny_embeddings, synthetic_corpus,
 ):

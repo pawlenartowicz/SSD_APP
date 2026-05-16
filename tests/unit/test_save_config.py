@@ -11,8 +11,14 @@ Dropped: test_item_config_defaults_are_none (trivial),
 
 from dataclasses import replace
 
+from types import MappingProxyType
 
-from ssdiff_gui.utils.save_config import SaveConfig, ItemConfig
+from ssdiff_gui.utils.save_config import (
+    DEFAULT_REPORT_SECTION_KEYS,
+    ItemConfig,
+    ReportSectionConfig,
+    SaveConfig,
+)
 
 
 def test_defaults_report_ticked_others_unticked():
@@ -23,6 +29,17 @@ def test_defaults_report_ticked_others_unticked():
     for v in cfg.items.values():
         assert isinstance(v, ItemConfig)
         assert v.enabled is False
+
+
+def test_defaults_report_sections_all_enabled_with_library_defaults():
+    cfg = SaveConfig.default()
+    assert set(cfg.report_sections) == set(DEFAULT_REPORT_SECTION_KEYS)
+    for v in cfg.report_sections.values():
+        assert isinstance(v, ReportSectionConfig)
+        assert v.enabled is True
+        assert v.n is None
+        assert v.n_words is None
+        assert v.n_snippets is None
 
 
 def test_round_trip_preserves_cols_and_k(fake_settings):
@@ -79,3 +96,87 @@ def test_string_round_trip_via_qsettings_style_values(string_fake_settings):
     assert loaded.cols == ("word", "rank")
     assert loaded.k == 50
     assert round_tripped.report_format == "txt"
+
+
+def test_round_trip_preserves_report_section_overrides(fake_settings):
+    clusters = ReportSectionConfig(
+        enabled=True, n=20, n_words=8, n_snippets=2,
+    )
+    misdiagnosed = ReportSectionConfig(enabled=False, n=None)
+    cfg = replace(
+        SaveConfig.default(),
+        report_sections={
+            **SaveConfig.default().report_sections,
+            "clusters": clusters,
+            "misdiagnosed": misdiagnosed,
+        },
+    )
+    cfg.to_settings(fake_settings)
+    round_tripped = SaveConfig.from_settings(fake_settings)
+    assert round_tripped.report_sections["clusters"] == clusters
+    assert round_tripped.report_sections["misdiagnosed"] == misdiagnosed
+    # Untouched sections stay at the library-default sentinel.
+    assert round_tripped.report_sections["top_words"] == ReportSectionConfig()
+
+
+def test_string_round_trip_preserves_report_sections(string_fake_settings):
+    clusters = ReportSectionConfig(
+        enabled=True, n=15, n_words=7, n_snippets=0,
+    )
+    cfg = replace(
+        SaveConfig.default(),
+        report_sections={
+            **SaveConfig.default().report_sections,
+            "clusters": clusters,
+        },
+    )
+    cfg.to_settings(string_fake_settings)
+    assert isinstance(
+        string_fake_settings._store.get("save/report_sections/clusters_n"),
+        str,
+    )
+    round_tripped = SaveConfig.from_settings(string_fake_settings)
+    assert round_tripped.report_sections["clusters"] == clusters
+
+
+def test_report_kwargs_filters_to_allowed_sections_and_skips_disabled():
+    cfg = replace(
+        SaveConfig.default(),
+        report_sections=MappingProxyType({
+            "top_words":    ReportSectionConfig(enabled=True, n=10),
+            "clusters":     ReportSectionConfig(
+                enabled=True, n=20, n_words=8, n_snippets=2,
+            ),
+            "extreme_docs": ReportSectionConfig(enabled=False),
+            "misdiagnosed": ReportSectionConfig(),  # all defaults
+            "top":          ReportSectionConfig(enabled=True, n=50),
+        }),
+    )
+
+    kwargs = cfg.report_kwargs(
+        ("top_words", "clusters", "extreme_docs", "misdiagnosed"),
+    )
+
+    # No "top" — it wasn't in the allowed list (Lexicon-only).
+    assert set(kwargs) == {
+        "top_words", "clusters", "extreme_docs", "misdiagnosed",
+    }
+    assert kwargs["top_words"] == {"n": 10}
+    assert kwargs["clusters"] == {"n": 20, "n_words": 8, "n_snippets": 2}
+    assert kwargs["extreme_docs"] is False
+    # All-default section => True (let the library pick).
+    assert kwargs["misdiagnosed"] is True
+
+
+def test_report_kwargs_n_snippets_zero_passes_through():
+    """0 means "drop excerpt column"; it must not collapse to "use default"."""
+    cfg = replace(
+        SaveConfig.default(),
+        report_sections=MappingProxyType({
+            **SaveConfig.default().report_sections,
+            "clusters": ReportSectionConfig(
+                enabled=True, n=None, n_words=None, n_snippets=0,
+            ),
+        }),
+    )
+    assert cfg.report_kwargs(("clusters",))["clusters"] == {"n_snippets": 0}

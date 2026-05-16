@@ -15,6 +15,27 @@ from pathlib import Path
 from .save_config import SaveConfig
 
 
+# Map from concrete ssdiff result class → report-section keys it accepts.
+# Sections are filtered against this before calling result.report(**kwargs);
+# passing an unknown kwarg would TypeError.
+def _report_sections_for(result) -> tuple[str, ...]:
+    try:
+        from ssdiff import GroupResult, PCAOLSResult, PLSResult
+        from ssdiff.results.lexicon_result import LexiconResult
+        from ssdiff.results.multi_pls_result import MultiPLSResult
+    except Exception:
+        return ()
+    if isinstance(result, (PLSResult, PCAOLSResult)):
+        return ("top_words", "clusters", "extreme_docs", "misdiagnosed")
+    if isinstance(result, GroupResult):
+        return ("top_words", "clusters")
+    if isinstance(result, MultiPLSResult):
+        return ("top_words",)
+    if isinstance(result, LexiconResult):
+        return ("top",)
+    return ()
+
+
 def export_result(result, result_path: Path, cfg: SaveConfig) -> None:
     """Write all ticked artifacts for ``result`` into ``result_path``."""
     result_path = Path(result_path)
@@ -52,8 +73,9 @@ def _resync_report(result, result_path: Path, cfg: SaveConfig) -> None:
         stale.unlink()
     if not cfg.report_enabled or result._result is None:
         return
+    kwargs = cfg.report_kwargs(_report_sections_for(result._result))
     try:
-        report = result._result.report()
+        report = result._result.report(**kwargs)
     except Exception:
         return
     report.save(str(result_path / f"report.{cfg.report_format}"))
@@ -109,12 +131,30 @@ def _resync_tables(result, result_path: Path, cfg: SaveConfig) -> None:
             r.words.save(str(tables_dir / f"words.{ext}"), **_save_kwargs(cfg, "words"))
 
         if _item_enabled(cfg, "clusters") and hasattr(r, "clusters"):
-            r.clusters.pos.save(str(tables_dir / f"clusters_pos.{ext}"), **_save_kwargs(cfg, "clusters"))
-            r.clusters.neg.save(str(tables_dir / f"clusters_neg.{ext}"), **_save_kwargs(cfg, "clusters"))
+            clusters_view = r.clusters
+            kw = _save_kwargs(cfg, "clusters")
+            if hasattr(clusters_view, "pos"):  # single-result sided API
+                clusters_view.pos.save(str(tables_dir / f"clusters_pos.{ext}"), **kw)
+                clusters_view.neg.save(str(tables_dir / f"clusters_neg.{ext}"), **kw)
+            else:  # multi-pair _ShimView — fan out per pair via shim.save()
+                clusters_view.save(str(tables_dir / f"clusters.{ext}"), **kw)
 
         if _item_enabled(cfg, "cluster_words") and hasattr(r, "clusters"):
-            r.clusters.pos.words.save(str(tables_dir / f"cluster_words_pos.{ext}"), **_save_kwargs(cfg, "cluster_words"))
-            r.clusters.neg.words.save(str(tables_dir / f"cluster_words_neg.{ext}"), **_save_kwargs(cfg, "cluster_words"))
+            clusters_view = r.clusters
+            kw = _save_kwargs(cfg, "cluster_words")
+            if hasattr(clusters_view, "pos"):
+                clusters_view.pos.words.save(str(tables_dir / f"cluster_words_pos.{ext}"), **kw)
+                clusters_view.neg.words.save(str(tables_dir / f"cluster_words_neg.{ext}"), **kw)
+            else:  # multi-pair — iterate leaves per pair / per side
+                for pair_key in clusters_view.keys():
+                    pair_str = r._key_to_str(pair_key)
+                    leaf = clusters_view[pair_key]
+                    leaf.pos.words.save(
+                        str(tables_dir / f"cluster_words_{pair_str}_pos.{ext}"), **kw,
+                    )
+                    leaf.neg.words.save(
+                        str(tables_dir / f"cluster_words_{pair_str}_neg.{ext}"), **kw,
+                    )
 
         if _item_enabled(cfg, "snippets") and hasattr(r, "snippets"):
             r.snippets.save(str(tables_dir / f"snippets.{ext}"), **_save_kwargs(cfg, "snippets"))

@@ -15,10 +15,17 @@ from PySide6.QtWidgets import (
 
 from ssdiff import GroupResult, PCAOLSResult, PLSResult
 from ssdiff.results.display import NARRATIVE_EXTS, TABULAR_EXTS
+from ssdiff.results.lexicon_result import LexiconResult
 from ssdiff.results.multi_pls_result import MultiPLSResult
 
 from ..utils.artifact_registry import get_columns
-from ..utils.save_config import DEFAULT_ITEM_KEYS, ItemConfig, SaveConfig
+from ..utils.save_config import (
+    DEFAULT_ITEM_KEYS,
+    DEFAULT_REPORT_SECTION_KEYS,
+    ItemConfig,
+    ReportSectionConfig,
+    SaveConfig,
+)
 from ..utils.settings import app_settings
 
 
@@ -33,6 +40,35 @@ _ROW_SPEC: tuple[tuple[str, str, tuple[type, ...] | None], ...] = (
     ("Misdiagnosed docs",                "docs_misdiagnosed", (PLSResult, PCAOLSResult)),
     ("Pairs list",                       "pairs",            (GroupResult, MultiPLSResult)),
 )
+
+# Report sections — (label, section_key, applicable result types).
+# Spinbox defaults track the SSDLite library defaults; bumping the library
+# defaults later still works (the dialog just lags one bump until the user
+# re-saves).
+_REPORT_SECTION_SPEC: tuple[
+    tuple[str, str, tuple[type, ...]], ...
+] = (
+    ("Top words section",   "top_words",
+        (PLSResult, PCAOLSResult, GroupResult, MultiPLSResult)),
+    ("Clusters section",    "clusters",
+        (PLSResult, PCAOLSResult, GroupResult)),
+    ("Extreme docs section", "extreme_docs",
+        (PLSResult, PCAOLSResult)),
+    ("Misdiagnosed section", "misdiagnosed",
+        (PLSResult, PCAOLSResult)),
+    ("Suggestions (top)",   "top",
+        (LexiconResult,)),
+)
+
+# Initial spinbox values when ReportSectionConfig has None for a knob.
+# Mirrors SSDLite defaults so the on-disk QSettings stays predictable.
+_REPORT_SECTION_DEFAULTS: dict[str, dict[str, int]] = {
+    "top_words":    {"n": 5},
+    "clusters":     {"n": 10, "n_words": 5, "n_snippets": 1},
+    "extreme_docs": {"n": 5},
+    "misdiagnosed": {"n": 5},
+    "top":          {"n": 20},
+}
 
 # Keys for rows that are plain checkboxes only — no column/row controls.
 _FLAT_KEYS = frozenset({"sweep_plot"})
@@ -245,6 +281,89 @@ class _ArtifactRow(QWidget):
         self._content.setVisible(not self._content.isVisible())
 
 
+class _ReportSectionRow(QWidget):
+    """One report-section row: enable checkbox + label + per-knob spinboxes.
+
+    Only the ``clusters`` section exposes ``n_words`` and ``n_snippets``
+    spinboxes; every other section has just ``n``. ``n_snippets`` allows
+    0 (drops the excerpt column).
+    """
+
+    def __init__(self, label: str, section_key: str,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._section_key = section_key
+        self._defaults = _REPORT_SECTION_DEFAULTS[section_key]
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(_DETAIL_INDENT, 2, 0, 2)
+        row.setSpacing(8)
+
+        self.enabled_checkbox = QCheckBox(label)
+        row.addWidget(self.enabled_checkbox)
+        row.addSpacing(8)
+
+        self._n_spinbox = self._make_spinbox(self._defaults["n"], min_value=1)
+        row.addWidget(QLabel("n:"))
+        row.addWidget(self._n_spinbox)
+
+        if section_key == "clusters":
+            self._n_words_spinbox = self._make_spinbox(
+                self._defaults["n_words"], min_value=1,
+            )
+            row.addSpacing(6)
+            row.addWidget(QLabel("words:"))
+            row.addWidget(self._n_words_spinbox)
+
+            self._n_snippets_spinbox = self._make_spinbox(
+                self._defaults["n_snippets"], min_value=0,
+            )
+            row.addSpacing(6)
+            row.addWidget(QLabel("snippets:"))
+            row.addWidget(self._n_snippets_spinbox)
+        else:
+            self._n_words_spinbox = None
+            self._n_snippets_spinbox = None
+
+        row.addStretch()
+
+    @staticmethod
+    def _make_spinbox(initial: int, *, min_value: int) -> QSpinBox:
+        sb = QSpinBox()
+        sb.setRange(min_value, 10000)
+        sb.setSingleStep(1)
+        sb.setValue(initial)
+        return sb
+
+    def set_value(self, section: ReportSectionConfig) -> None:
+        self.enabled_checkbox.setChecked(section.enabled)
+        self._n_spinbox.setValue(
+            section.n if section.n is not None else self._defaults["n"]
+        )
+        if self._n_words_spinbox is not None:
+            self._n_words_spinbox.setValue(
+                section.n_words
+                if section.n_words is not None
+                else self._defaults["n_words"]
+            )
+        if self._n_snippets_spinbox is not None:
+            self._n_snippets_spinbox.setValue(
+                section.n_snippets
+                if section.n_snippets is not None
+                else self._defaults["n_snippets"]
+            )
+
+    def value(self) -> ReportSectionConfig:
+        return ReportSectionConfig(
+            enabled=self.enabled_checkbox.isChecked(),
+            n=self._n_spinbox.value(),
+            n_words=(self._n_words_spinbox.value()
+                     if self._n_words_spinbox is not None else None),
+            n_snippets=(self._n_snippets_spinbox.value()
+                        if self._n_snippets_spinbox is not None else None),
+        )
+
+
 class SaveSettingsDialog(QDialog):
     def __init__(self, result_type: type, parent=None):
         super().__init__(parent)
@@ -283,6 +402,22 @@ class SaveSettingsDialog(QDialog):
 
         self._report_checkbox = QCheckBox("Report")
         items_layout.addWidget(self._report_checkbox)
+
+        self._report_section_rows: dict[str, _ReportSectionRow] = {}
+        for label, key, show_for in _REPORT_SECTION_SPEC:
+            row = _ReportSectionRow(label, key, parent=items_box)
+            row.setVisible(issubclass(self._result_type, show_for))
+            self._report_section_rows[key] = row
+            items_layout.addWidget(row)
+
+        # Section rows are only meaningful when the master Report checkbox is
+        # ticked. Greying them out makes that wiring legible.
+        def _sync_sections_enabled(checked: bool) -> None:
+            for r in self._report_section_rows.values():
+                r.setEnabled(checked)
+
+        self._report_checkbox.toggled.connect(_sync_sections_enabled)
+        _sync_sections_enabled(self._report_checkbox.isChecked())
 
         self._item_rows: dict[str, _ArtifactRow] = {}
         for label, key, show_for in _ROW_SPEC:
@@ -330,6 +465,9 @@ class SaveSettingsDialog(QDialog):
         for key, row in self._item_rows.items():
             row.set_value(cfg.items.get(key, ItemConfig()))
 
+        for key, sec_row in self._report_section_rows.items():
+            sec_row.set_value(cfg.report_sections.get(key, ReportSectionConfig()))
+
     def _current_cfg(self) -> SaveConfig:
         items: dict[str, ItemConfig] = {}
         for key, row in self._item_rows.items():
@@ -341,12 +479,27 @@ class SaveSettingsDialog(QDialog):
             if key not in items:
                 items[key] = self._initial_cfg.items.get(key, ItemConfig())
 
+        sections: dict[str, ReportSectionConfig] = {}
+        for key, sec_row in self._report_section_rows.items():
+            if sec_row.isVisible():
+                sections[key] = sec_row.value()
+            else:
+                sections[key] = self._initial_cfg.report_sections.get(
+                    key, ReportSectionConfig()
+                )
+        for key in DEFAULT_REPORT_SECTION_KEYS:
+            if key not in sections:
+                sections[key] = self._initial_cfg.report_sections.get(
+                    key, ReportSectionConfig()
+                )
+
         return replace(
             self._initial_cfg,
             report_enabled=self._report_checkbox.isChecked(),
             report_format=self._report_format.currentText(),
             tables_format=self._tables_format.currentText(),
             items=MappingProxyType(items),
+            report_sections=MappingProxyType(sections),
         )
 
     def _reset_defaults(self) -> None:

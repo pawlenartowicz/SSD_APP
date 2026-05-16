@@ -116,9 +116,6 @@ def _clusters_to_summary(clusters_side, side: str) -> list[dict]:
     rows = []
     try:
         for rank, c in enumerate(clusters_side, 1):
-            top_words_str = ", ".join(
-                w.word for w in list(clusters_side(c.cluster_id).words)[:5]
-            )
             rows.append({
                 "cluster_rank": rank,
                 "cluster_id": c.cluster_id,
@@ -126,7 +123,7 @@ def _clusters_to_summary(clusters_side, side: str) -> list[dict]:
                 "size": c.size,
                 "coherence": c.coherence,
                 "centroid_cos_beta": c.centroid_cos_beta,
-                "top_words": top_words_str,
+                "top_words": c.top_words,
             })
     except Exception:
         return []
@@ -903,6 +900,10 @@ class Stage3Widget(QWidget):
         )
 
         self.result_saved.emit()
+        QMessageBox.information(
+            self, "Result Saved",
+            f"Saved \"{result.name or result.result_id}\" to:\n{result.result_path}",
+        )
 
     def _overwrite_saved_result(self):
         """Re-save a saved result in place (regenerate files, keep result_id)."""
@@ -921,6 +922,10 @@ class Stage3Widget(QWidget):
 
         self.project.mark_dirty()
         self.result_saved.emit()
+        QMessageBox.information(
+            self, "Result Overwritten",
+            f"Updated \"{result.name or result.result_id}\" at:\n{result.result_path}",
+        )
 
     def _delete_result_by_index(self, row: int):
         """Remove a result: drop it from the project, then trash its folder (if present).
